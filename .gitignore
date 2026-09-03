@@ -1,0 +1,23 @@
+# Secrets — never commit
+.env
+*.pem
+*.key
+
+# Build output
+/velora
+/velora.exe
+/bin/
+/dist/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Local database volume
+/deploy/pgdata/
+
+# Editors
+.DS_Store
+.idea/
+*.swp

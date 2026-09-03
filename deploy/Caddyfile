@@ -1,0 +1,23 @@
+# Local development. For production replace `:80` with the real hostname and
+# Caddy will obtain and renew TLS certificates automatically.
+
+:80 {
+	encode gzip zstd
+
+	# WebSocket upgrades pass through untouched — the chat gateway needs the
+	# connection held open well past a normal request timeout.
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade    websocket
+	}
+	reverse_proxy @websocket api:8080
+
+	reverse_proxy /* api:8080 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

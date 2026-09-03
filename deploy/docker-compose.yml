@@ -1,0 +1,71 @@
+# Local development stack. Production runs the same api/worker images but
+# points DATABASE_URL at managed Postgres — the postgres service here is for
+# development only, never for real user data.
+
+name: velora
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: velora
+      POSTGRES_PASSWORD: velora
+      POSTGRES_DB: velora
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U velora -d velora"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["serve"]
+    environment:
+      VELORA_ENV: development
+      PORT: "8080"
+      DATABASE_URL: postgres://velora:velora@postgres:5432/velora?sslmode=disable
+      ALLOWED_ORIGINS: http://localhost:3000
+      LOG_LEVEL: debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  # Same image, different argument. The worker shares the database with the
+  # API because the job queue lives in Postgres (River), not a separate broker.
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["work"]
+    environment:
+      VELORA_ENV: development
+      DATABASE_URL: postgres://velora:velora@postgres:5432/velora?sslmode=disable
+      LOG_LEVEL: debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
