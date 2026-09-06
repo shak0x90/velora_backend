@@ -301,15 +301,10 @@ func (s *Service) Refresh(ctx context.Context, presented string) (Session, error
 		return Session{}, err
 	}
 
-	var email, name string
+	var email, name, method string
 	var isPremium bool
-	if err := tx.QueryRow(ctx, `
-		select coalesce((select identifier from auth_identities
-		                 where user_id = u.id and method = 'email' limit 1), ''),
-		       coalesce((select first_name from profiles where user_id = u.id), ''),
-		       u.is_premium
-		from users u where u.id = $1
-	`, userID).Scan(&email, &name, &isPremium); err != nil {
+	if err := tx.QueryRow(ctx, primaryIdentityQuery, userID).
+		Scan(&email, &name, &method, &isPremium); err != nil {
 		return Session{}, err
 	}
 
@@ -319,10 +314,23 @@ func (s *Service) Refresh(ctx context.Context, presented string) (Session, error
 
 	session.User = AuthUser{
 		ID: userID.String(), DisplayName: name, Email: email,
-		Method: "google", IsPremium: isPremium,
+		Method: method, IsPremium: isPremium,
 	}
 	return session, nil
 }
+
+// primaryIdentityQuery reports how the account actually signs in. Google wins
+// when both exist, because that is the passwordless path the person chose.
+const primaryIdentityQuery = `
+	select coalesce((select identifier from auth_identities
+	                 where user_id = u.id and method = 'email' limit 1), ''),
+	       coalesce((select first_name from profiles where user_id = u.id), ''),
+	       coalesce((select method from auth_identities
+	                 where user_id = u.id
+	                 order by (method = 'google') desc limit 1), 'email'),
+	       u.is_premium
+	from users u where u.id = $1
+`
 
 // SignOut revokes the whole family, so every device sharing that chain is out.
 func (s *Service) SignOut(ctx context.Context, presented string) error {
@@ -359,17 +367,19 @@ func (s *Service) CurrentUser(ctx context.Context, userID string) (AuthUser, err
 	var out AuthUser
 	err := s.pool.QueryRow(ctx, `
 		select u.id::text,
-		       coalesce((select first_name from profiles where user_id = u.id), ''),
 		       coalesce((select identifier from auth_identities
 		                 where user_id = u.id and method = 'email' limit 1), ''),
+		       coalesce((select first_name from profiles where user_id = u.id), ''),
+		       coalesce((select method from auth_identities
+		                 where user_id = u.id
+		                 order by (method = 'google') desc limit 1), 'email'),
 		       u.is_premium
 		from users u
 		where u.id = $1 and u.status = 'active'
-	`, userID).Scan(&out.ID, &out.DisplayName, &out.Email, &out.IsPremium)
+	`, userID).Scan(&out.ID, &out.Email, &out.DisplayName, &out.Method, &out.IsPremium)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthUser{}, ErrInvalidToken
 	}
-	out.Method = "google"
 	return out, err
 }
 
