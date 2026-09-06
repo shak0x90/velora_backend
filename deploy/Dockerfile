@@ -1,7 +1,7 @@
 # Build once, run as either `serve` or `work` — the command is the only
 # difference between the API and the worker.
 
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 
 # Copy manifests first so dependency download caches across source changes.

@@ -20,6 +20,11 @@ type Config struct {
 	TokenSigningKey string
 	AllowedOrigins  []string
 	LogLevel        string
+	// GoogleClientIDs are the OAuth client IDs accepted as the `aud` claim —
+	// one each for web, Android, and iOS. These are not secrets; they ship
+	// inside the client apps. Rejecting anything else is what stops a token
+	// minted for a different app from working here.
+	GoogleClientIDs []string
 }
 
 func (c Config) IsProduction() bool { return c.Env == "production" }
@@ -36,6 +41,7 @@ func Load() (Config, error) {
 		TokenSigningKey: os.Getenv("TOKEN_SIGNING_KEY"),
 		AllowedOrigins:  getList("ALLOWED_ORIGINS", []string{"http://localhost:3000"}),
 		LogLevel:        getString("LOG_LEVEL", "info"),
+		GoogleClientIDs: getList("GOOGLE_CLIENT_IDS", nil),
 	}
 
 	var missing []string

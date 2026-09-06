@@ -20,7 +20,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shak0x90/velora_backend/internal/auth"
 	"github.com/shak0x90/velora_backend/internal/config"
+	"github.com/shak0x90/velora_backend/internal/db"
 	"github.com/shak0x90/velora_backend/internal/httpx"
 )
 
@@ -95,6 +97,26 @@ func setupLogging(cfg config.Config) {
 }
 
 func serve(cfg config.Config) error {
+	ctx := context.Background()
+
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	authService := auth.New(pool, auth.Config{
+		SigningKey:      auth.DecodeSigningKey(cfg.TokenSigningKey),
+		AccessTokenTTL:  cfg.AccessTokenTTL,
+		RefreshTokenTTL: cfg.RefreshTokenTTL,
+		GoogleClientIDs: cfg.GoogleClientIDs,
+	})
+	if len(cfg.GoogleClientIDs) == 0 {
+		// Not fatal: the service still serves health and can be deployed
+		// before the OAuth clients exist. Sign-in will refuse until they do.
+		slog.Warn("GOOGLE_CLIENT_IDS is empty — Google sign-in will reject every request")
+	}
+
 	mux := http.NewServeMux()
 
 	// Catch-all first: without it, unmatched routes get Go's plain-text 404,
@@ -104,11 +126,18 @@ func serve(cfg config.Config) error {
 	})
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		httpx.JSON(w, http.StatusOK, map[string]string{
-			"status": "ok",
-			"env":    cfg.Env,
-		})
+		body := map[string]any{"status": "ok", "env": cfg.Env}
+		if err := pool.Ping(r.Context()); err != nil {
+			body["status"] = "degraded"
+			body["database"] = "unreachable"
+			httpx.JSON(w, http.StatusServiceUnavailable, body)
+			return
+		}
+		body["database"] = "ok"
+		httpx.JSON(w, http.StatusOK, body)
 	})
+
+	authService.Routes(mux)
 
 	// Middleware runs outermost first: recover before logging, so a panic is
 	// still reported as a completed request with a 500.
@@ -163,8 +192,15 @@ func work(cfg config.Config) error {
 
 func migrate(cfg config.Config) error {
 	slog.Info("migrate", "database", redactDSN(cfg.DatabaseURL))
-	// goose wiring lands with the first migration in Phase 1.
-	return errors.New("migrate: not implemented yet — see internal/db/migrations")
+	if err := db.Migrate(cfg.DatabaseURL); err != nil {
+		return err
+	}
+	version, err := db.Version(cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	slog.Info("migrated", "version", version)
+	return nil
 }
 
 // redactDSN keeps a connection string loggable by dropping the credentials.
