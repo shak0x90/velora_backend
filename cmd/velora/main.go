@@ -24,6 +24,7 @@ import (
 	"github.com/shak0x90/velora_backend/internal/config"
 	"github.com/shak0x90/velora_backend/internal/db"
 	"github.com/shak0x90/velora_backend/internal/httpx"
+	"github.com/shak0x90/velora_backend/internal/media"
 )
 
 func main() {
@@ -138,6 +139,12 @@ func serve(cfg config.Config) error {
 	})
 
 	authService.Routes(mux)
+
+	mediaService := media.New(pool, media.LocalStore{
+		Root:    cfg.MediaRoot,
+		BaseURL: cfg.MediaBaseURL,
+	}, authService.RequireAuth)
+	mediaService.Routes(mux)
 
 	// Middleware runs outermost first: recover before logging, so a panic is
 	// still reported as a completed request with a 500.
