@@ -22,6 +22,11 @@ func UserIDFrom(ctx context.Context) string {
 
 // Routes registers the auth endpoints on the given mux.
 func (s *Service) Routes(mux *http.ServeMux) {
+	// Email + password. Here so accounts can be created before the Google
+	// OAuth clients exist, since those need a real domain.
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+
 	mux.HandleFunc("POST /auth/social", s.handleSocial)
 	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
