@@ -30,7 +30,8 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/social", s.handleSocial)
 	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
-	mux.Handle("GET /me", s.RequireAuth(http.HandlerFunc(s.handleMe)))
+	// GET /me belongs to the profile package: the response is mostly profile,
+	// and this package contributes only the account object, via CurrentUser.
 }
 
 type socialRequest struct {
@@ -99,20 +100,6 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httpx.JSON(w, http.StatusNoContent, nil)
-}
-
-func (s *Service) handleMe(w http.ResponseWriter, r *http.Request) {
-	user, err := s.CurrentUser(r.Context(), UserIDFrom(r.Context()))
-	if err != nil {
-		httpx.Error(w, r, translate(err))
-		return
-	}
-	// Profile is null until onboarding writes one — the client uses that to
-	// decide between the feed and the onboarding flow.
-	httpx.JSON(w, http.StatusOK, map[string]any{
-		"user":    user,
-		"profile": nil,
-	})
 }
 
 // RequireAuth rejects anything without a valid bearer token.

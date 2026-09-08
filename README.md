@@ -33,6 +33,11 @@ internal/
   compat/              compatibility engine — stdlib + domain only
   config/              environment parsing and validation
   httpx/               problem-details errors, middleware
+  auth/                identity, tokens, RequireAuth
+  media/               photo upload, variants, object keys
+  profile/             the /me surface, and every profile read
+  discovery/           feed, daily picks, search, profile detail
+  social/              passes, likes, matches, notifications
   db/migrations/       goose migrations
 deploy/                Dockerfile, Compose, Caddyfile
 ```
@@ -107,6 +112,80 @@ Google lookups key on the `sub` claim, not the email: an admin can reassign an
 email, but the subject is permanent. The email is stored as its own identity
 row so a later email login resolves to the same user instead of duplicating it.
 
+## Profile
+
+```
+GET   /me                 → user + profile + completion (both null pre-onboarding)
+PATCH /me                 → the updated profile
+POST  /me/onboarding      → creates the row; firstName, dateOfBirth, gender required
+```
+
+`PATCH /me` takes a partial profile where every field is optional, so absent
+and cleared are different requests. Validation runs before any column is
+written, which is what makes a rejected patch leave the row untouched.
+Server-derived fields (`age`, `distanceKm`, `photoVerified`, …) are accepted
+and ignored, because both clients type their patch as a partial `Profile`.
+
+`photos` in a patch is a reconciliation: the listed photos take that order and
+anything left out is deleted. A URL matching none of the caller's photos
+rejects the whole request rather than being skipped — on a stale list, quietly
+ignoring it would delete every photo the client did not know about.
+
+Reads are batched. One feed of candidates costs five queries, not five per
+person, and every profile in the service is assembled by `profile.query` so
+there is a single definition of what a profile is.
+
+## Discovery
+
+```
+GET /discover?filters=<json>       → ranked profiles
+GET /discover/daily-picks          → the top five
+GET /search?q=                     → ranked text matches
+GET /profiles?ids=a,b,c            → batch lookup for likes and matches screens
+GET /profiles/{id}                 → profile + compatibility
+GET /profiles/{id}/suggestions     → conversation openers
+```
+
+**The database narrows, Go ranks.** SQL excludes only who cannot be shown at
+all — yourself, hidden profiles, anyone you already passed, liked or matched —
+because those are index lookups against sets that grow with use. Everything
+after that runs through `compat`, so the server and both clients score
+identically rather than half-expressing the rules in SQL.
+
+Distance is computed in SQL via `earthdistance` so the GiST index is usable.
+Unknown coordinates score 0 rather than null: an unplaced profile should still
+be visible, and a distance filter it could never satisfy would hide it forever.
+
+Search deliberately ignores the saved filters. Someone typing a name is looking
+for that person, not for whoever survives their age range — but their stated
+gender preference still holds, because that is a preference rather than a
+filter to widen.
+
+## Likes, matches, notifications
+
+```
+POST   /passes/{id}
+POST   /likes                      → { matched, match? }
+GET    /likes/incoming | /likes/outgoing
+DELETE /likes/{id}
+GET    /matches
+GET    /notifications
+POST   /notifications/{id}/read
+```
+
+A match is one row for the pair, not one per side; `check (user_a < user_b)`
+is what makes that enforceable, since otherwise `(a,b)` and `(b,a)` both insert
+and the same two people match twice. Creating one is a single transaction: the
+pair row, the deletion of the two likes it consumed, and both notifications
+have to agree, or someone ends up matched while still listed as a pending like.
+
+A like that is not yet mutual notifies the recipient without naming the sender.
+Revealing who is waiting is what the likes screen is for.
+
+`lastMessagePreview` and `unreadCount` are present and zero until the messaging
+phase, so the match screens degrade to "matched, no chat yet" rather than
+failing to render.
+
 ## Photos
 
 `POST /me/photos` takes a multipart `photo` and returns every variant URL.
@@ -158,17 +237,26 @@ Plain HTTP, so treat everything on it as visible on the wire, and rotate
 
 ## Status
 
-Done: Phase 0 foundations, the compatibility port, and Phase 1 auth plus photo
-storage. Schema at version 3.
+Done: Phase 0 foundations, the compatibility port, Phase 1 auth plus photo
+storage, the profile surface, and discovery with likes and matches. Schema at
+version 4.
+
+**Not yet run against Postgres.** Everything above compiles, vets and passes
+its unit tests, but the queries in `profile`, `discovery` and `social` have not
+been exercised against a real database. Migrate the test server and walk one
+account through sign-up, onboarding, a like and a match before trusting them.
 
 Next, in order:
 
-1. **Profile endpoints** — `PATCH /me`, an onboarding write, a real `profile`
-   in `/me`. The tables exist; this is handlers and queries.
-2. **Golden vectors** — `TestMatchesDartGoldens` still skips. Until it is green
+1. **Golden vectors** — `TestMatchesDartGoldens` still skips. Until it is green
    the Go scorer is unverified against Dart and the client-side scorers must
    stay.
-3. **Discovery** — candidate query plus the ported ranking.
-4. **Chat and presence**, then **safety**.
+2. **Chat and presence** — conversations, messages, the dual-consent reveal.
+   This is the last mocked surface in the web client.
+3. **Safety** — reporting, blocking, moderation.
+
+Deferred deliberately: daily picks are recomputed per request rather than
+frozen by a scheduled job, and incoming likes are returned without a premium
+gate, matching what the clients already do with seed data.
 
 Blocked on a domain: Google sign-in, and moving photos to R2 behind a CDN.

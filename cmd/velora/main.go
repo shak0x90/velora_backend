@@ -23,8 +23,11 @@ import (
 	"github.com/shak0x90/velora_backend/internal/auth"
 	"github.com/shak0x90/velora_backend/internal/config"
 	"github.com/shak0x90/velora_backend/internal/db"
+	"github.com/shak0x90/velora_backend/internal/discovery"
 	"github.com/shak0x90/velora_backend/internal/httpx"
 	"github.com/shak0x90/velora_backend/internal/media"
+	"github.com/shak0x90/velora_backend/internal/profile"
+	"github.com/shak0x90/velora_backend/internal/social"
 )
 
 func main() {
@@ -145,6 +148,16 @@ func serve(cfg config.Config) error {
 		BaseURL: cfg.MediaBaseURL,
 	}, authService.RequireAuth)
 	mediaService.Routes(mux)
+
+	// After media: assembling a profile joins photo URLs onto the row, so it
+	// needs the store's URL scheme. GET /me is registered here, not by auth.
+	profileService := profile.New(pool, mediaService, authService)
+	profileService.Routes(mux)
+
+	// Discovery reads profiles through the profile service rather than the
+	// pool, so there is one definition of how a row becomes a Profile.
+	discovery.New(profileService, authService.RequireAuth).Routes(mux)
+	social.New(pool, authService).Routes(mux)
 
 	// Middleware runs outermost first: recover before logging, so a panic is
 	// still reported as a completed request with a 500.

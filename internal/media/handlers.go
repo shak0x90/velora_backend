@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -44,6 +45,99 @@ type Photo struct {
 }
 
 const maxPhotosPerProfile = 6
+
+// ErrUnknownPhoto means a caller referenced a photo URL that is not one of
+// their own. It is a client-state problem, not a server one.
+var ErrUnknownPhoto = errors.New("photo does not belong to this profile")
+
+// URLs returns the caller's photos as card URLs in position order. This is the
+// `photos` array a Profile carries: one URL per photo, at the size the grids
+// actually render, so nothing downloads a 1080px hero to draw a tile.
+func (s *Service) URLs(ctx context.Context, userID string) ([]string, error) {
+	photos, err := s.list(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	urls := make([]string, 0, len(photos))
+	for _, p := range photos {
+		urls = append(urls, p.Card)
+	}
+	return urls, nil
+}
+
+// URLsFor is the batched form of URLs, for a feed of candidates. One query for
+// forty profiles rather than forty queries; the map is keyed by user id and
+// omits anyone with no photos.
+func (s *Service) URLsFor(ctx context.Context, userIDs []string) (map[string][]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		select user_id::text, object_key from profile_photos
+		where user_id = any($1) order by user_id, position
+	`, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string][]string{}
+	for rows.Next() {
+		var userID, key string
+		if err := rows.Scan(&userID, &key); err != nil {
+			return nil, err
+		}
+		out[userID] = append(out[userID], s.store.URL(KeyFor(key, VariantCard)))
+	}
+	return out, rows.Err()
+}
+
+// Reconcile makes the caller's photo set match the given URLs exactly: the
+// listed photos take that order, and any photo left out is deleted.
+//
+// It exists so `PATCH /me` can carry the photo grid the user is looking at,
+// which is how both clients model editing a profile. A URL matching none of
+// the caller's photos aborts the whole thing with ErrUnknownPhoto rather than
+// being skipped — on a stale list, quietly ignoring the unmatched entry would
+// delete every photo the client did not know about.
+func (s *Service) Reconcile(ctx context.Context, userID string, urls []string) error {
+	photos, err := s.list(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	// Any variant URL identifies the photo, because a client holds whichever
+	// size it happened to render.
+	byURL := make(map[string]Photo, len(photos)*3)
+	for _, p := range photos {
+		byURL[p.Full] = p
+		byURL[p.Card] = p
+		byURL[p.Thumb] = p
+	}
+
+	keep := make([]string, 0, len(urls))
+	seen := make(map[string]bool, len(urls))
+	for _, url := range urls {
+		p, ok := byURL[url]
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrUnknownPhoto, url)
+		}
+		if seen[p.ID] {
+			continue
+		}
+		seen[p.ID] = true
+		keep = append(keep, p.ID)
+	}
+
+	for _, p := range photos {
+		if !seen[p.ID] {
+			if err := s.deletePhoto(ctx, userID, p.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if len(keep) == 0 {
+		return nil
+	}
+	return s.reorder(ctx, userID, keep)
+}
 
 func (s *Service) list(ctx context.Context, userID string) ([]Photo, error) {
 	rows, err := s.pool.Query(ctx, `
@@ -152,36 +246,45 @@ func (s *Service) handleUpload(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusCreated, map[string]any{"photos": photos})
 }
 
-func (s *Service) handleDelete(w http.ResponseWriter, r *http.Request) {
-	userID := auth.UserIDFrom(r.Context())
-	id := r.PathValue("id")
-
+// deletePhoto removes one photo and closes the gap it leaves in the ordering.
+// ErrUnknownPhoto means the id is not the caller's.
+func (s *Service) deletePhoto(ctx context.Context, userID, id string) error {
 	var key string
 	// The user_id predicate is the authorization check: without it, any
 	// authenticated caller could delete any photo by guessing an id.
-	err := s.pool.QueryRow(r.Context(), `
+	err := s.pool.QueryRow(ctx, `
 		delete from profile_photos where id = $1 and user_id = $2 returning object_key
 	`, id, userID).Scan(&key)
 	if err != nil {
-		httpx.Error(w, r, httpx.NotFound("That photo is not on your profile."))
-		return
+		return ErrUnknownPhoto
 	}
 
 	for _, variant := range AllVariants {
 		// The row is already gone, so the photo is no longer shown. A few
 		// orphaned files are better than failing a delete the user asked for.
-		_ = s.store.Delete(r.Context(), KeyFor(key, variant))
+		_ = s.store.Delete(ctx, KeyFor(key, variant))
 	}
 
 	// Close the gap the delete left, so positions stay 0..n-1.
-	if _, err := s.pool.Exec(r.Context(), `
+	_, err = s.pool.Exec(ctx, `
 		with ordered as (
 			select id, row_number() over (order by position) - 1 as new_position
 			from profile_photos where user_id = $1
 		)
 		update profile_photos p set position = o.new_position
 		from ordered o where p.id = o.id
-	`, userID); err != nil {
+	`, userID)
+	return err
+}
+
+func (s *Service) handleDelete(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFrom(r.Context())
+
+	if err := s.deletePhoto(r.Context(), userID, r.PathValue("id")); err != nil {
+		if errors.Is(err, ErrUnknownPhoto) {
+			httpx.Error(w, r, httpx.NotFound("That photo is not on your profile."))
+			return
+		}
 		httpx.Error(w, r, err)
 		return
 	}
@@ -199,6 +302,31 @@ type reorderRequest struct {
 	IDs []string `json:"ids"`
 }
 
+// reorder assigns positions 0..n-1 in the given id order.
+func (s *Service) reorder(ctx context.Context, userID string, ids []string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Shift out of the way first. Position is unique per user, so assigning
+	// the new values directly would collide with rows not yet moved.
+	if _, err := tx.Exec(ctx,
+		`update profile_photos set position = position + 100 where user_id = $1`,
+		userID); err != nil {
+		return err
+	}
+	for index, id := range ids {
+		if _, err := tx.Exec(ctx, `
+			update profile_photos set position = $1 where id = $2 and user_id = $3
+		`, index, id, userID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Service) handleReorder(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFrom(r.Context())
 
@@ -212,30 +340,7 @@ func (s *Service) handleReorder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx, err := s.pool.Begin(r.Context())
-	if err != nil {
-		httpx.Error(w, r, err)
-		return
-	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-
-	// Shift out of the way first. Position is unique per user, so assigning
-	// the new values directly would collide with rows not yet moved.
-	if _, err := tx.Exec(r.Context(),
-		`update profile_photos set position = position + 100 where user_id = $1`,
-		userID); err != nil {
-		httpx.Error(w, r, err)
-		return
-	}
-	for index, id := range req.IDs {
-		if _, err := tx.Exec(r.Context(), `
-			update profile_photos set position = $1 where id = $2 and user_id = $3
-		`, index, id, userID); err != nil {
-			httpx.Error(w, r, err)
-			return
-		}
-	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.reorder(r.Context(), userID, req.IDs); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
