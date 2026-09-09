@@ -21,3 +21,6 @@ coverage.*
 .DS_Store
 .idea/
 *.swp
+
+# Stray Next.js output, if a web build is ever run from this directory by mistake.
+.next/
