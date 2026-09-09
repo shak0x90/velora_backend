@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shak0x90/velora_backend/internal/auth"
+	"github.com/shak0x90/velora_backend/internal/chatlog"
 	"github.com/shak0x90/velora_backend/internal/domain"
 )
 
@@ -248,6 +249,9 @@ func createMatch(ctx context.Context, tx pgx.Tx, viewer, other string) (domain.M
 		returning id::text, created_at
 	`, uuid.New(), low, high).Scan(&id, &createdAt); err != nil {
 		return domain.MatchRecord{}, fmt.Errorf("create match: %w", err)
+	}
+	if _, err := chatlog.EnsureMatch(ctx, tx, viewer, other); err != nil {
+		return domain.MatchRecord{}, err
 	}
 
 	if _, err := tx.Exec(ctx, `

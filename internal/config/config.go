@@ -38,7 +38,10 @@ type Config struct {
 	// EnableAPIDocs serves the OpenAPI document and the browser explorer.
 	// Off in production by default: the explorer has a "try it" button, and an
 	// unauthenticated map of every endpoint is a gift to whoever is probing.
-	EnableAPIDocs bool
+	EnableAPIDocs   bool
+	VAPIDPublicKey  string
+	VAPIDPrivateKey string
+	VAPIDSubject    string
 }
 
 func (c Config) IsProduction() bool { return c.Env == "production" }
@@ -58,6 +61,9 @@ func Load() (Config, error) {
 		GoogleClientIDs: getList("GOOGLE_CLIENT_IDS", nil),
 		MediaRoot:       getString("MEDIA_ROOT", "/var/www/velora-media"),
 		MediaBaseURL:    getString("MEDIA_BASE_URL", "http://localhost:8080/media"),
+		VAPIDPublicKey:  os.Getenv("VAPID_PUBLIC_KEY"),
+		VAPIDPrivateKey: os.Getenv("VAPID_PRIVATE_KEY"),
+		VAPIDSubject:    os.Getenv("VAPID_SUBJECT"),
 	}
 	// Defaults to on outside production, so a fresh clone has the explorer
 	// without anyone reading the README to find it.

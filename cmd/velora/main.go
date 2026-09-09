@@ -22,6 +22,8 @@ import (
 
 	"github.com/shak0x90/velora_backend/internal/apidocs"
 	"github.com/shak0x90/velora_backend/internal/auth"
+	"github.com/shak0x90/velora_backend/internal/chat"
+	"github.com/shak0x90/velora_backend/internal/chatpush"
 	"github.com/shak0x90/velora_backend/internal/config"
 	"github.com/shak0x90/velora_backend/internal/db"
 	"github.com/shak0x90/velora_backend/internal/discovery"
@@ -166,6 +168,17 @@ func serve(cfg config.Config) error {
 	discovery.New(profileService, authService.RequireAuth).Routes(mux)
 	social.New(pool, authService).Routes(mux)
 	safety.New(pool, authService).Routes(mux)
+	pushQueue, err := chatpush.New(pool, chatpush.Config{PublicKey: cfg.VAPIDPublicKey, PrivateKey: cfg.VAPIDPrivateKey, Subject: cfg.VAPIDSubject}, false)
+	if err != nil {
+		return err
+	}
+	pushQueue.Routes(mux, authService)
+	chatService := chat.New(pool, authService, cfg.AllowedOrigins, pushQueue.Enqueue)
+	chatService.Routes(mux)
+	chatCtx, cancelChat := context.WithCancel(ctx)
+	defer cancelChat()
+	defer chatService.Close()
+	go chatService.Run(chatCtx)
 
 	if cfg.EnableAPIDocs {
 		apidocs.Routes(mux)
@@ -219,6 +232,7 @@ func serve(cfg config.Config) error {
 		return err
 	case <-ctx.Done():
 		slog.Info("shutting down")
+		chatService.Close()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
@@ -227,12 +241,26 @@ func serve(cfg config.Config) error {
 
 func work(cfg config.Config) error {
 	slog.Info("worker starting", "env", cfg.Env)
-	// River job registration lands here in Phase 1, when the first job
-	// (photo processing) exists. Until then the worker just idles so the
-	// Compose file and deploy path can be exercised end to end.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	queue, err := chatpush.New(pool, chatpush.Config{PublicKey: cfg.VAPIDPublicKey, PrivateKey: cfg.VAPIDPrivateKey, Subject: cfg.VAPIDSubject}, true)
+	if err != nil {
+		return err
+	}
+	if err = queue.Start(ctx); err != nil {
+		return err
+	}
 	<-ctx.Done()
+	shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err = queue.Stop(shutdown); err != nil {
+		return err
+	}
 	slog.Info("worker stopped")
 	return nil
 }
@@ -286,6 +314,14 @@ func moderator(cfg config.Config, args []string) error {
 func migrate(cfg config.Config) error {
 	slog.Info("migrate", "database", redactDSN(cfg.DatabaseURL))
 	if err := db.Migrate(cfg.DatabaseURL); err != nil {
+		return err
+	}
+	pool, err := db.Connect(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err = chatpush.Migrate(context.Background(), pool); err != nil {
 		return err
 	}
 	version, err := db.Version(cfg.DatabaseURL)

@@ -1,0 +1,16 @@
+# Add this location INSIDE the existing server block when the web client uses
+# NEXT_PUBLIC_API_URL=/api. Adapt the upstream port to the existing API service.
+# Keep the normal /api/ proxy location for all other HTTP routes.
+location = /api/chat/ws {
+    proxy_pass http://127.0.0.1:8080/chat/ws;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+    proxy_buffering off;
+}

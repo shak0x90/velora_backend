@@ -1,10 +1,12 @@
 package httpx
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"slices"
@@ -49,6 +51,15 @@ type statusRecorder struct {
 	http.ResponseWriter
 	status int
 	bytes  int
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(s.ResponseWriter).Hijack()
+	if err == nil {
+		s.status = http.StatusSwitchingProtocols
+	}
+	return conn, rw, err
 }
 
 func (s *statusRecorder) WriteHeader(code int) {

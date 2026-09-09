@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shak0x90/velora_backend/internal/auth"
+	"github.com/shak0x90/velora_backend/internal/chatlog"
 )
 
 var (
@@ -73,6 +74,12 @@ func (s *Service) Block(ctx context.Context, userID, targetID, reason string) er
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := chatlog.LockPair(ctx, tx, userID, targetID); err != nil {
+		return err
+	}
+	if err := chatlog.ClosePair(ctx, tx, userID, targetID, false); err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(ctx, `
 		insert into blocks (user_id, blocked_id, reason) values ($1, $2, $3)
@@ -159,15 +166,23 @@ func (s *Service) Unmatch(ctx context.Context, userID, matchID string) error {
 
 	var a, b string
 	err = tx.QueryRow(ctx, `
-		delete from matches
+		select user_a::text, user_b::text from matches
 		where id = $1 and (user_a = $2 or user_b = $2)
-		returning user_a::text, user_b::text
 	`, matchID, userID).Scan(&a, &b)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoSuchMatch
 	}
 	if err != nil {
 		return translate(err)
+	}
+	if err = chatlog.LockPair(ctx, tx, a, b); err != nil {
+		return err
+	}
+	if err = chatlog.ClosePair(ctx, tx, a, b, true); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `delete from matches where id=$1`, matchID); err != nil {
+		return err
 	}
 
 	if _, err := tx.Exec(ctx, `

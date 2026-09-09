@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Velora API",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "description": "Dating and social API for the Velora clients.\n\n**Getting a token.** Run `POST /auth/register` with a throwaway address, copy `accessToken` from the response, press **Authorize**, and paste it. Access tokens last 15 minutes; `POST /auth/refresh` rotates them, and spending one refresh token twice revokes the whole family.\n\n**Errors** are RFC 9457 problem documents: `type`, `title`, `status`, `detail`, and `instance` carrying the request id, so an error a person saw can be traced to a log line.\n\n**Blocking** is enforced in every read path and in both directions. A blocked profile answers 404 exactly like a deleted one — which of the two happened is deliberately not disclosed."
   },
   "servers": [
@@ -10,6 +10,7 @@
     { "url": "/", "description": "Directly against the API" }
   ],
   "tags": [
+    { "name": "chat", "description": "Durable direct messaging and recovery" },
     { "name": "auth", "description": "Accounts, tokens, sessions" },
     { "name": "me", "description": "Your own profile" },
     { "name": "photos", "description": "Profile photos" },
@@ -29,6 +30,274 @@
       }
     },
     "schemas": {
+      "ChatSend": {
+        "type": "object",
+        "properties": {
+          "clientMessageId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "text"
+            ]
+          },
+          "replyToId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "clientMessageId",
+          "body"
+        ]
+      },
+      "ChatMessage": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "conversationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "seq": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "example": "42",
+            "description": "Decimal int64; never parse as a JavaScript Number."
+          },
+          "clientMessageId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "senderParticipantId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mine": {
+            "type": "boolean"
+          },
+          "body": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "text"
+            ]
+          },
+          "replyToId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deletedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "conversationId",
+          "seq",
+          "clientMessageId",
+          "senderParticipantId",
+          "mine",
+          "body",
+          "kind",
+          "createdAt"
+        ]
+      },
+      "ChatConversation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "match",
+              "request",
+              "anonymous"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "pending"
+            ]
+          },
+          "profileId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "participantId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lastSeq": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "example": "42",
+            "description": "Decimal int64; never parse as a JavaScript Number."
+          },
+          "lastReadSeq": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "example": "42",
+            "description": "Decimal int64; never parse as a JavaScript Number."
+          },
+          "peerReadSeq": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "example": "42",
+            "description": "Decimal int64; never parse as a JavaScript Number."
+          },
+          "peerDeliveredSeq": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "example": "42",
+            "description": "Decimal int64; never parse as a JavaScript Number."
+          },
+          "unreadCount": {
+            "type": "integer"
+          },
+          "preview": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "muted": {
+            "type": "boolean"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "canSend": {
+            "type": "boolean"
+          },
+          "canAccept": {
+            "type": "boolean"
+          },
+          "identityHidden": {
+            "type": "boolean"
+          },
+          "revealConsented": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ChatSnapshot": {
+        "type": "object",
+        "properties": {
+          "conversations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatConversation"
+            }
+          },
+          "cursor": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "example": "42",
+            "description": "Decimal int64; never parse as a JavaScript Number."
+          },
+          "unreadCount": {
+            "type": "integer"
+          },
+          "nextOffset": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversations",
+          "cursor",
+          "unreadCount"
+        ]
+      },
+      "ChatHistory": {
+        "type": "object",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "messages",
+          "hasMore"
+        ]
+      },
+      "ChatEvents": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "cursor": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$",
+                  "example": "42",
+                  "description": "Decimal int64; never parse as a JavaScript Number."
+                },
+                "conversationId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "kind": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cursor",
+                "conversationId",
+                "kind"
+              ]
+            }
+          },
+          "cursor": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "example": "42",
+            "description": "Decimal int64; never parse as a JavaScript Number."
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "events",
+          "cursor",
+          "hasMore"
+        ]
+      },
       "Problem": {
         "type": "object",
         "description": "RFC 9457. Every error the API returns uses this shape.",
@@ -425,6 +694,850 @@
   },
   "security": [{ "bearerAuth": [] }],
   "paths": {
+    "/chat/bootstrap": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Snapshot of the inbox and matching recovery cursor",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "description": "Returns up to 100 conversation summaries, never full histories. Anonymous peer profileId is omitted until both consent. unreadCount covers all conversations.",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            }
+          }
+        ]
+      }
+    },
+    "/conversations": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Paginate conversation summaries",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Open a dating chat or send a social introduction",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "profileId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "origin": {
+                    "type": "string",
+                    "enum": [
+                      "match",
+                      "request"
+                    ]
+                  },
+                  "clientMessageId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "body": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "text"
+                    ]
+                  },
+                  "replyToId": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "profileId",
+                  "origin"
+                ]
+              }
+            }
+          }
+        },
+        "description": "A dating conversation requires an active mutual match. A request requires one text introduction and clientMessageId. Reuse that ID if the response is lost."
+      }
+    },
+    "/conversations/{id}/messages": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Read message history or recover a gap",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatHistory"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "description": "Choose afterSeq OR beforeSeq. Returned messages are ascending by seq. Without a cursor, returns the latest page.",
+        "parameters": [
+          {
+            "name": "afterSeq",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "example": "42",
+              "description": "Decimal int64; never parse as a JavaScript Number."
+            }
+          },
+          {
+            "name": "beforeSeq",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "example": "42",
+              "description": "Decimal int64; never parse as a JavaScript Number."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Durably send one text message",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatSend"
+              }
+            }
+          }
+        },
+        "description": "Same conversation + sender + clientMessageId returns the existing message. A changed body or reply target with that ID is rejected. Both participants receive durable event invalidations."
+      }
+    },
+    "/conversations/{id}/actions": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Accept, decline, reveal, mute or archive",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "accept",
+                      "decline",
+                      "reveal",
+                      "mute",
+                      "unmute",
+                      "archive",
+                      "unarchive"
+                    ]
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/{id}/safety": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Report or block a conversation-local peer",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "report",
+                      "block"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  "messageId": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            }
+          }
+        },
+        "description": "Works before anonymous reveal. For reports, reason is required. Optional messageId must identify a peer message in this conversation; its evidence is copied to moderation."
+      }
+    },
+    "/chat/events": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Recover durable metadata events",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatEvents"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "description": "Per-user cursor; distinct from per-conversation message seq. Maximum 100 events per page. Metadata only: refetch authorized conversation/history views for content.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "example": "42",
+              "description": "Decimal int64; never parse as a JavaScript Number."
+            },
+            "required": true
+          }
+        ]
+      }
+    },
+    "/chat/realtime-ticket": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Mint a single-use 30-second socket ticket",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ticket": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "ticket"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "description": "Authenticate with Bearer here. Send the ticket in the first WebSocket frame, never in the URL."
+      }
+    },
+    "/chat/ws": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Upgrade to WebSocket",
+        "security": [],
+        "description": "Allowed browser Origin required. Within 5 seconds send {\"ticket\":\"...\",\"after\":\"0\"}. Server sends {\"type\":\"events\",\"data\":ChatEvents}. Optional client frame {\"type\":\"typing\",\"conversationId\":\"uuid\"}; server typing frame contains only conversationId. Sockets expire with access tokens; obtain a fresh ticket on reconnect. Typing is local to one serve instance.",
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade; authentication follows in first frame"
+          },
+          "403": {
+            "description": "Origin rejected"
+          }
+        }
+      }
+    },
+    "/chat/anonymous": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Join or renew explicit anonymous pairing",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "waiting": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "description": "Requires an active adult visible profile. Queue entry expires after 30 seconds; renew every 10 seconds while the user is searching. Both users must opt in and meet mutual preferences."
+      },
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Leave the anonymous queue",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        }
+      }
+    },
+    "/chat/push": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Get the configured Web Push public key",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "publicKey": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Register this browser push subscription",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "endpoint": {
+                    "type": "string"
+                  },
+                  "keys": {
+                    "type": "object",
+                    "properties": {
+                      "p256dh": {
+                        "type": "string"
+                      },
+                      "auth": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "p256dh",
+                      "auth"
+                    ]
+                  }
+                },
+                "required": [
+                  "endpoint",
+                  "keys"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Remove this browser subscription",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "endpoint": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "endpoint"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/{id}/read": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Advance the read cursor",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "seq": {
+                    "type": "string",
+                    "pattern": "^[0-9]+$",
+                    "example": "42",
+                    "description": "Decimal int64; never parse as a JavaScript Number."
+                  }
+                },
+                "required": [
+                  "seq"
+                ]
+              }
+            }
+          }
+        },
+        "description": "Monotonic per-participant cursor. Read also advances delivered. Pending requests do not publish receipts."
+      }
+    },
+    "/conversations/{id}/delivered": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Advance the delivered cursor",
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Sign in again"
+          },
+          "404": {
+            "description": "Conversation unavailable"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "seq": {
+                    "type": "string",
+                    "pattern": "^[0-9]+$",
+                    "example": "42",
+                    "description": "Decimal int64; never parse as a JavaScript Number."
+                  }
+                },
+                "required": [
+                  "seq"
+                ]
+              }
+            }
+          }
+        },
+        "description": "Monotonic per-participant cursor. Read also advances delivered. Pending requests do not publish receipts."
+      }
+    },
     "/healthz": {
       "get": {
         "tags": ["service"],

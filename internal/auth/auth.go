@@ -343,9 +343,11 @@ const primaryIdentityQuery = `
 func (s *Service) SignOut(ctx context.Context, presented string) error {
 	sum := sha256.Sum256([]byte(presented))
 	_, err := s.pool.Exec(ctx, `
-		update refresh_tokens set revoked_at = now()
+		with revoked as (update refresh_tokens set revoked_at = now()
 		where family_id = (select family_id from refresh_tokens where token_hash = $1)
-		  and revoked_at is null
+		  and revoked_at is null returning user_id),
+		cleared as (delete from chat_tickets where user_id in(select user_id from revoked))
+		select pg_notify('velora_chat','logout:' || user_id::text) from revoked group by user_id
 	`, sum[:])
 	return err
 }

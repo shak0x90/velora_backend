@@ -1,11 +1,11 @@
 # Velora backend
 
-Go API behind the Velora clients — the web app (`velora_web`) and the Flutter
+Go API behind the Velora clients — the web app (`reactapp`) and the Flutter
 app (`Dating_Frontend`). A modular monolith: one binary, three modes.
 
 ```
 velora serve     HTTP + WebSocket API
-velora work      background jobs (photos, daily picks, push)
+velora work      background jobs (currently chat push)
 velora migrate   apply database migrations, then exit
 ```
 
@@ -38,6 +38,9 @@ internal/
   profile/             the /me surface, and every profile read
   discovery/           feed, daily picks, search, profile detail
   social/              passes, likes, matches, notifications
+  chat/                conversations, messages, receipts, sockets, anonymous pairing
+  chatlog/             transactional per-user events and safety closure
+  chatpush/            River jobs and browser push
   db/migrations/       goose migrations
 deploy/                Dockerfile, Compose, Caddyfile
 ```
@@ -271,26 +274,20 @@ Plain HTTP, so treat everything on it as visible on the wire, and rotate
 
 ## Status
 
-Done: Phase 0 foundations, the compatibility port, Phase 1 auth plus photo
-storage, the profile surface, and discovery with likes and matches. Schema at
-version 4.
+The backend now includes authentication, profiles/photos, discovery, likes/matches,
+safety/moderation and live direct chat. Goose schema version: **7**, plus River's
+job schema. The chat queries and critical safety transitions have been exercised
+against isolated PostgreSQL; two browser accounts also completed signup,
+onboarding, matching and live messages.
 
-**Not yet run against Postgres.** Everything above compiles, vets and passes
-its unit tests, but the queries in `profile`, `discovery` and `social` have not
-been exercised against a real database. Migrate the test server and walk one
-account through sign-up, onboarding, a like and a match before trusting them.
+See [CHAT.md](CHAT.md) for implemented features, message/recovery contracts,
+local test results, runtime configuration and remaining boundaries. The OpenAPI
+explorer includes all chat routes. These changes have not been deployed.
 
-Next, in order:
+Still pending: Dart compatibility golden vectors, private chat attachments,
+voice/groups/calls, user-facing presence and event retention/resync. Browser
+push is implemented but requires VAPID configuration and external-provider
+verification. Google sign-in and the planned R2/CDN setup remain separate work.
 
-1. **Golden vectors** — `TestMatchesDartGoldens` still skips. Until it is green
-   the Go scorer is unverified against Dart and the client-side scorers must
-   stay.
-2. **Chat and presence** — conversations, messages, the dual-consent reveal.
-   This is the last mocked surface in the web client.
-3. **Safety** — reporting, blocking, moderation.
-
-Deferred deliberately: daily picks are recomputed per request rather than
-frozen by a scheduled job, and incoming likes are returned without a premium
-gate, matching what the clients already do with seed data.
-
-Blocked on a domain: Google sign-in, and moving photos to R2 behind a CDN.
+Daily picks remain computed per request, and incoming likes retain the existing
+premium-gate behavior.
