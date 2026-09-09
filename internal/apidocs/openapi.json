@@ -1,0 +1,1290 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Velora API",
+    "version": "0.5.0",
+    "description": "Dating and social API for the Velora clients.\n\n**Getting a token.** Run `POST /auth/register` with a throwaway address, copy `accessToken` from the response, press **Authorize**, and paste it. Access tokens last 15 minutes; `POST /auth/refresh` rotates them, and spending one refresh token twice revokes the whole family.\n\n**Errors** are RFC 9457 problem documents: `type`, `title`, `status`, `detail`, and `instance` carrying the request id, so an error a person saw can be traced to a log line.\n\n**Blocking** is enforced in every read path and in both directions. A blocked profile answers 404 exactly like a deleted one — which of the two happened is deliberately not disclosed."
+  },
+  "servers": [
+    { "url": "/api", "description": "Through nginx on the test server" },
+    { "url": "/", "description": "Directly against the API" }
+  ],
+  "tags": [
+    { "name": "auth", "description": "Accounts, tokens, sessions" },
+    { "name": "me", "description": "Your own profile" },
+    { "name": "photos", "description": "Profile photos" },
+    { "name": "discovery", "description": "The feed, search, and other people" },
+    { "name": "social", "description": "Likes, passes, matches, notifications" },
+    { "name": "safety", "description": "Blocking, reporting, unmatching" },
+    { "name": "moderation", "description": "The report queue. Moderators only." },
+    { "name": "service", "description": "Health" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "The `accessToken` from register, login, or refresh."
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457. Every error the API returns uses this shape.",
+        "properties": {
+          "type": { "type": "string", "example": "about:blank#bad-request" },
+          "title": { "type": "string", "example": "Bad request" },
+          "status": { "type": "integer", "example": 400 },
+          "detail": { "type": "string", "example": "Your first name cannot be empty." },
+          "instance": {
+            "type": "string",
+            "description": "The request id, for finding this in the logs.",
+            "example": "c3588ff1957f8aa6"
+          }
+        }
+      },
+      "AuthUser": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "displayName": { "type": "string", "example": "Sam" },
+          "email": { "type": "string", "example": "sam@velora.test" },
+          "phone": { "type": "string" },
+          "method": { "type": "string", "enum": ["email", "phone", "google", "apple"] },
+          "isPremium": { "type": "boolean" }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "user": { "$ref": "#/components/schemas/AuthUser" },
+          "accessToken": { "type": "string", "description": "Bearer token, 15 minutes." },
+          "refreshToken": {
+            "type": "string",
+            "description": "Rotates on use. Presenting a spent one revokes the family."
+          },
+          "expiresAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Lifestyle": {
+        "type": "object",
+        "properties": {
+          "exercise": { "type": "string" },
+          "drinking": { "type": "string" },
+          "smoking": { "type": "string" },
+          "diet": { "type": "string" },
+          "sleepSchedule": { "type": "string" },
+          "pets": { "type": "string" },
+          "children": { "type": "string" },
+          "religion": { "type": "string" },
+          "languages": { "type": "array", "items": { "type": "string" } },
+          "heightCm": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Null means prefer not to say. 90-260 when given."
+          }
+        }
+      },
+      "DatingPreferences": {
+        "type": "object",
+        "properties": {
+          "interestedIn": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["woman", "man", "nonBinary", "other"] }
+          },
+          "minAge": { "type": "integer", "minimum": 18, "maximum": 120, "example": 27 },
+          "maxAge": { "type": "integer", "minimum": 18, "maximum": 120, "example": 42 },
+          "maxDistanceKm": { "type": "integer", "minimum": 1, "maximum": 500, "example": 40 },
+          "intents": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["longTerm", "seriousOpen", "casual", "newConnections", "notSure"]
+            }
+          }
+        }
+      },
+      "ProfilePrompt": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Minted by the server. A client-side id sent on write is replaced."
+          },
+          "question": { "type": "string", "example": "A perfect Sunday" },
+          "answer": { "type": "string", "example": "Kiln, then tacos." }
+        }
+      },
+      "PersonalityAnswer": {
+        "type": "object",
+        "properties": {
+          "questionId": { "type": "string", "example": "q1" },
+          "question": { "type": "string" },
+          "answer": { "type": "string" }
+        }
+      },
+      "Profile": {
+        "type": "object",
+        "description": "One person as every client renders them. Derived fields (age, distanceKm, onlineStatus) are computed server-side and ignored on write.",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "firstName": { "type": "string", "example": "Sam" },
+          "age": { "type": "integer", "description": "Completed years, from dateOfBirth." },
+          "dateOfBirth": { "type": "string", "format": "date-time" },
+          "gender": { "type": "string", "enum": ["woman", "man", "nonBinary", "other"] },
+          "pronouns": { "type": "string", "example": "she/her" },
+          "city": { "type": "string" },
+          "neighborhood": { "type": "string" },
+          "distanceKm": {
+            "type": "number",
+            "description": "From the viewer. Zero when either side has no location."
+          },
+          "occupation": { "type": "string" },
+          "education": { "type": "string" },
+          "bio": { "type": "string" },
+          "photos": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Card-sized URLs, in order. Always an array, never null."
+          },
+          "interests": { "type": "array", "items": { "type": "string" } },
+          "prompts": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ProfilePrompt" }
+          },
+          "relationshipIntent": {
+            "type": "string",
+            "enum": ["longTerm", "seriousOpen", "casual", "newConnections", "notSure"]
+          },
+          "preferences": { "$ref": "#/components/schemas/DatingPreferences" },
+          "lifestyle": { "$ref": "#/components/schemas/Lifestyle" },
+          "communicationStyle": {
+            "type": "string",
+            "enum": ["thoughtful", "playful", "direct", "slowBurn", "frequent"]
+          },
+          "personalityTraits": { "type": "array", "items": { "type": "string" } },
+          "personalityAnswers": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PersonalityAnswer" }
+          },
+          "photoVerified": { "type": "boolean" },
+          "phoneVerified": { "type": "boolean" },
+          "onlineStatus": {
+            "type": "string",
+            "enum": ["online", "recently", "thisWeek", "offline"]
+          },
+          "lastActive": { "type": "string", "format": "date-time" },
+          "incognito": { "type": "boolean" },
+          "hidden": {
+            "type": "boolean",
+            "description": "Paused discovery. Hidden profiles are unreachable by anyone but their owner."
+          }
+        }
+      },
+      "ProfilePatch": {
+        "type": "object",
+        "description": "Every field optional. Absent means unchanged; sending a value changes it. Validation runs before any column is written, so a rejected patch leaves the row untouched.",
+        "properties": {
+          "firstName": { "type": "string" },
+          "dateOfBirth": {
+            "type": "string",
+            "description": "YYYY-MM-DD, or the RFC 3339 form the API emits.",
+            "example": "1994-03-12"
+          },
+          "gender": { "type": "string", "enum": ["woman", "man", "nonBinary", "other"] },
+          "pronouns": { "type": "string" },
+          "city": { "type": "string" },
+          "neighborhood": { "type": "string" },
+          "lat": { "type": "number" },
+          "lng": { "type": "number" },
+          "occupation": { "type": "string" },
+          "education": { "type": "string" },
+          "bio": { "type": "string" },
+          "photos": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Reconciles your photos: the listed ones take that order, anything omitted is deleted. A URL that is not yours rejects the whole request."
+          },
+          "interests": { "type": "array", "items": { "type": "string" } },
+          "prompts": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ProfilePrompt" }
+          },
+          "relationshipIntent": {
+            "type": "string",
+            "enum": ["longTerm", "seriousOpen", "casual", "newConnections", "notSure"]
+          },
+          "preferences": { "$ref": "#/components/schemas/DatingPreferences" },
+          "lifestyle": { "$ref": "#/components/schemas/Lifestyle" },
+          "communicationStyle": {
+            "type": "string",
+            "enum": ["thoughtful", "playful", "direct", "slowBurn", "frequent"]
+          },
+          "personalityTraits": { "type": "array", "items": { "type": "string" } },
+          "personalityAnswers": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PersonalityAnswer" }
+          },
+          "incognito": { "type": "boolean" },
+          "hidden": { "type": "boolean" }
+        }
+      },
+      "CompletionAdvice": {
+        "type": "object",
+        "properties": {
+          "percent": { "type": "integer", "example": 44 },
+          "tips": { "type": "array", "items": { "type": "string" }, "maxItems": 3 }
+        }
+      },
+      "MeResponse": {
+        "type": "object",
+        "properties": {
+          "user": { "$ref": "#/components/schemas/AuthUser" },
+          "profile": {
+            "allOf": [{ "$ref": "#/components/schemas/Profile" }],
+            "nullable": true,
+            "description": "Null until onboarding writes a row. That null is what tells a client to show the wizard."
+          },
+          "completion": {
+            "allOf": [{ "$ref": "#/components/schemas/CompletionAdvice" }],
+            "nullable": true
+          }
+        }
+      },
+      "CompatibilityResult": {
+        "type": "object",
+        "description": "Why two people were put in front of each other. Derived from stated answers and shared interests — it is not a prediction about a relationship.",
+        "properties": {
+          "overallScore": { "type": "integer" },
+          "personalityScore": { "type": "integer" },
+          "lifestyleScore": { "type": "integer" },
+          "interestScore": { "type": "integer" },
+          "relationshipScore": { "type": "integer" },
+          "communicationScore": { "type": "integer" },
+          "locationScore": { "type": "integer" },
+          "commonInterests": { "type": "array", "items": { "type": "string" } },
+          "insights": { "type": "array", "items": { "type": "string" } },
+          "summary": { "type": "string" }
+        }
+      },
+      "RankedProfile": {
+        "type": "object",
+        "properties": {
+          "profile": { "$ref": "#/components/schemas/Profile" },
+          "compatibility": { "$ref": "#/components/schemas/CompatibilityResult" },
+          "rankScore": { "type": "number" }
+        }
+      },
+      "Photo": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "position": { "type": "integer" },
+          "status": { "type": "string", "enum": ["pending", "ready", "rejected"] },
+          "full": { "type": "string", "description": "1080px" },
+          "card": { "type": "string", "description": "480px square" },
+          "thumb": { "type": "string", "description": "160px square" }
+        }
+      },
+      "PhotoList": {
+        "type": "object",
+        "properties": {
+          "photos": { "type": "array", "items": { "$ref": "#/components/schemas/Photo" } }
+        }
+      },
+      "ProfileLike": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "fromProfileId": { "type": "string", "format": "uuid" },
+          "toProfileId": { "type": "string", "format": "uuid" },
+          "kind": { "type": "string", "enum": ["profile", "photo", "prompt", "interest"] },
+          "label": { "type": "string", "example": "Liked your photo" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "priority": { "type": "boolean" }
+        }
+      },
+      "MatchRecord": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "profileId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Always the other person."
+          },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "lastMessagePreview": {
+            "type": "string",
+            "description": "Empty until the messaging phase lands."
+          },
+          "unreadCount": { "type": "integer" },
+          "isNew": { "type": "boolean" }
+        }
+      },
+      "AppNotification": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "kind": {
+            "type": "string",
+            "enum": ["like", "match", "message", "matchmaker", "profile"]
+          },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "profileId": {
+            "type": "string",
+            "description": "Absent when the notice is not about a person. A like notification never names the sender."
+          },
+          "read": { "type": "boolean" }
+        }
+      },
+      "ConversationSuggestion": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "tone": {
+            "type": "string",
+            "enum": ["opener", "playful", "sincere", "deeper", "shared"]
+          },
+          "reason": { "type": "string" }
+        }
+      },
+      "BlockedEntry": {
+        "type": "object",
+        "properties": {
+          "profileId": { "type": "string", "format": "uuid" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ModerationReport": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "reporterId": { "type": "string", "format": "uuid" },
+          "subjectId": { "type": "string", "format": "uuid" },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "harassment",
+              "spam",
+              "fake_profile",
+              "inappropriate_photos",
+              "underage",
+              "offline_behaviour",
+              "other"
+            ]
+          },
+          "detail": { "type": "string" },
+          "context": { "type": "string", "enum": ["profile", "photo", "message", "prompt"] },
+          "status": { "type": "string", "enum": ["open", "reviewing", "actioned", "dismissed"] },
+          "resolution": { "type": "string" },
+          "reviewedAt": { "type": "string", "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "priorReports": {
+            "type": "integer",
+            "description": "How many times anyone has reported this subject. One is a disagreement; the fifth is a pattern."
+          }
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "No token, or an expired one.",
+        "content": {
+          "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } }
+        }
+      },
+      "NotFound": {
+        "description": "Gone, or never yours, or blocked — deliberately indistinguishable.",
+        "content": {
+          "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } }
+        }
+      },
+      "BadRequest": {
+        "description": "Understood and refused. `detail` is safe to show a person.",
+        "content": {
+          "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } }
+        }
+      },
+      "NoProfile": {
+        "description": "You have not finished onboarding.",
+        "content": {
+          "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } }
+        }
+      },
+      "TooMany": {
+        "description": "A daily limit: 60 likes on a free account, 20 reports, 100 blocks.",
+        "content": {
+          "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } }
+        }
+      }
+    }
+  },
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["service"],
+        "summary": "Liveness and database reachability",
+        "security": [],
+        "responses": {
+          "200": { "description": "Healthy" },
+          "503": { "description": "The database is unreachable" }
+        }
+      }
+    },
+    "/auth/register": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Create an account",
+        "description": "Start here. Copy `accessToken` from the response into **Authorize**.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password"],
+                "properties": {
+                  "email": { "type": "string", "example": "you+1@velora.test" },
+                  "password": {
+                    "type": "string",
+                    "minLength": 8,
+                    "example": "disposable-test-pw"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Session" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Sign in",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password"],
+                "properties": {
+                  "email": { "type": "string" },
+                  "password": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Session" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/auth/social": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Sign in with Google",
+        "description": "Verifies an ID token the client already holds. Refuses until GOOGLE_CLIENT_IDS is configured, which needs a domain.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["provider", "idToken"],
+                "properties": {
+                  "provider": { "type": "string", "enum": ["google"] },
+                  "idToken": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Session" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Rotate the session",
+        "description": "The refresh token changes every time. Presenting a spent one is treated as theft and revokes every token in the family, so never call this concurrently with itself.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["refreshToken"],
+                "properties": { "refreshToken": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A new session",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Session" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Sign out",
+        "description": "A logout with no body is still a logout; signing out never fails.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "refreshToken": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": { "204": { "description": "Signed out" } }
+      }
+    },
+    "/me": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Your account, profile, and completion advice",
+        "responses": {
+          "200": {
+            "description": "Profile and completion are null before onboarding.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/MeResponse" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "patch": {
+        "tags": ["me"],
+        "summary": "Change part of your profile",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProfilePatch" },
+              "example": {
+                "bio": "Kiln on weekends, tacos after.",
+                "interests": ["Books", "Coffee"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The whole profile, after the change",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Profile" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/NoProfile" }
+        }
+      }
+    },
+    "/me/onboarding": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Create your profile",
+        "description": "firstName, dateOfBirth and gender are required — the table cannot hold a row without them. Everything else is optional and can be filled in later with PATCH /me. Re-running this updates rather than failing, so an abandoned wizard can be restarted.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/ProfilePatch" },
+                  { "type": "object", "required": ["firstName", "dateOfBirth", "gender"] }
+                ]
+              },
+              "example": {
+                "firstName": "Sam",
+                "dateOfBirth": "1994-03-12",
+                "gender": "woman",
+                "occupation": "Ceramicist",
+                "interests": ["Books", "Coffee", "Hiking"],
+                "preferences": {
+                  "interestedIn": ["man", "nonBinary"],
+                  "minAge": 27,
+                  "maxAge": 42,
+                  "maxDistanceKm": 60
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/MeResponse" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/me/photos": {
+      "get": {
+        "tags": ["photos"],
+        "summary": "Your photos",
+        "responses": {
+          "200": {
+            "description": "In position order",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/PhotoList" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "tags": ["photos"],
+        "summary": "Upload a photo",
+        "description": "Multipart, field name `photo`. Max 10 MB and 30 megapixels once decoded. EXIF is stripped by re-encoding, which matters because phone photos carry GPS. Six photos maximum.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["photo"],
+                "properties": { "photo": { "type": "string", "format": "binary" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Every photo, including the new one",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/PhotoList" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/me/photos/{id}": {
+      "delete": {
+        "tags": ["photos"],
+        "summary": "Delete a photo",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "What remains",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/PhotoList" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/me/photos/order": {
+      "patch": {
+        "tags": ["photos"],
+        "summary": "Reorder your photos",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ids"],
+                "properties": { "ids": { "type": "array", "items": { "type": "string" } } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "In the new order",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/PhotoList" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/discover": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "The ranked feed",
+        "description": "Excludes yourself, hidden profiles, anyone blocked either way, and anyone you have already passed, liked, or matched.",
+        "parameters": [
+          {
+            "name": "filters",
+            "in": "query",
+            "description": "JSON DiscoverFilters. Omitted means the defaults; a zero value would match nobody.",
+            "schema": { "type": "string" },
+            "example": "{\"minAge\":25,\"maxAge\":40,\"maxDistanceKm\":50}"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked, best first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/RankedProfile" }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/NoProfile" }
+        }
+      }
+    },
+    "/discover/daily-picks": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "The top five",
+        "responses": {
+          "200": {
+            "description": "Ranked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/RankedProfile" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/NoProfile" }
+        }
+      }
+    },
+    "/search": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "Search by name, work, place, or interest",
+        "description": "Ignores your saved age and distance filters — someone typing a name is looking for that person — but still respects who you said you want to see.",
+        "parameters": [
+          { "name": "q", "in": "query", "schema": { "type": "string" }, "example": "ceramicist" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked matches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/RankedProfile" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/NoProfile" }
+        }
+      }
+    },
+    "/profiles": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "Resolve several profiles by id",
+        "description": "For the likes and matches screens, which hold ids. Applies the same visibility rules as a single lookup: hidden and blocked profiles are simply absent from the result.",
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "Comma-separated, at most 100.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Whichever of them you may see",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Profile" } }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/profiles/{id}": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "One profile, with the compatibility read",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Profile and compatibility",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/RankedProfile" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/NoProfile" }
+        }
+      }
+    },
+    "/profiles/{id}/suggestions": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "Conversation openers",
+        "description": "Templates drawn from shared interests and their prompts. Nothing is generated and nothing is sent — these are questions a person can choose, edit, or ignore.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          {
+            "name": "tone",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["opener", "playful", "sincere", "deeper", "shared"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Up to six",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/ConversationSuggestion" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/passes/{id}": {
+      "post": {
+        "tags": ["social"],
+        "summary": "Pass on someone",
+        "description": "Permanent, and idempotent — a double tap is the same fact.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Passed" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/likes": {
+      "post": {
+        "tags": ["social"],
+        "summary": "Like someone",
+        "description": "Creates the match when it is mutual, in one transaction with the likes it consumes and both notifications. A like toward someone either side has blocked answers 404, worded exactly like a deleted profile.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["profileId"],
+                "properties": {
+                  "profileId": { "type": "string", "format": "uuid" },
+                  "kind": {
+                    "type": "string",
+                    "enum": ["profile", "photo", "prompt", "interest"],
+                    "default": "profile"
+                  },
+                  "label": { "type": "string", "example": "Liked your answer about Sundays" },
+                  "priority": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Whether it matched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "matched": { "type": "boolean" },
+                    "match": { "$ref": "#/components/schemas/MatchRecord" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooMany" }
+        }
+      }
+    },
+    "/likes/incoming": {
+      "get": {
+        "tags": ["social"],
+        "summary": "Who liked you",
+        "description": "Priority likes first.",
+        "responses": {
+          "200": {
+            "description": "Pending likes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/ProfileLike" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/likes/outgoing": {
+      "get": {
+        "tags": ["social"],
+        "summary": "Who you liked",
+        "responses": {
+          "200": {
+            "description": "Pending likes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/ProfileLike" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/likes/{id}": {
+      "delete": {
+        "tags": ["social"],
+        "summary": "Dismiss a like",
+        "description": "Works from either side — withdrawing yours, or clearing one you received.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Gone" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/matches": {
+      "get": {
+        "tags": ["social"],
+        "summary": "Your matches",
+        "responses": {
+          "200": {
+            "description": "Newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/MatchRecord" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/matches/{id}": {
+      "delete": {
+        "tags": ["safety"],
+        "summary": "Unmatch",
+        "description": "Ends the connection from both sides and records a pass each way, so neither reappears in the other's feed. Says nothing about the other person — block is the stronger action.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Unmatched" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/notifications": {
+      "get": {
+        "tags": ["social"],
+        "summary": "Your notifications",
+        "description": "A like notification never names the sender: who liked you is what the likes screen is for.",
+        "responses": {
+          "200": {
+            "description": "Newest first, up to 100",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/AppNotification" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/notifications/{id}/read": {
+      "post": {
+        "tags": ["social"],
+        "summary": "Mark one read",
+        "description": "Idempotent, and keeps the first read time rather than the latest.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Marked" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/blocks": {
+      "get": {
+        "tags": ["safety"],
+        "summary": "Who you have blocked",
+        "responses": {
+          "200": {
+            "description": "Newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/BlockedEntry" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/blocks/{id}": {
+      "post": {
+        "tags": ["safety"],
+        "summary": "Block someone",
+        "description": "Enforced in every read path and both directions. Dissolves any match, removes the likes each way, and clears notifications naming them. The blocked person is not told.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "description": "For your own records. Never shown to them."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Blocked" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooMany" }
+        }
+      },
+      "delete": {
+        "tags": ["safety"],
+        "summary": "Unblock",
+        "description": "Restores contact. Does not restore a match the block ended.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Unblocked" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/reports": {
+      "post": {
+        "tags": ["safety"],
+        "summary": "Report someone",
+        "description": "Reporting the same person again updates the open report rather than adding another. Set `block` to do both at once. Nothing is disclosed to the person reported.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["profileId", "reason"],
+                "properties": {
+                  "profileId": { "type": "string", "format": "uuid" },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "harassment",
+                      "spam",
+                      "fake_profile",
+                      "inappropriate_photos",
+                      "underage",
+                      "offline_behaviour",
+                      "other"
+                    ]
+                  },
+                  "detail": { "type": "string", "maxLength": 2000 },
+                  "context": {
+                    "type": "string",
+                    "enum": ["profile", "photo", "message", "prompt"],
+                    "default": "profile"
+                  },
+                  "block": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Filed" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooMany" }
+        }
+      }
+    },
+    "/admin/reports": {
+      "get": {
+        "tags": ["moderation"],
+        "summary": "The report queue",
+        "description": "Moderators only — everyone else gets 404, because a 403 would confirm this exists. Grant with `velora moderator <email>` on the server.",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["open", "reviewing", "actioned", "dismissed"],
+              "default": "open"
+            }
+          },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Oldest first, so nothing waits forever",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/ModerationReport" }
+                }
+              }
+            }
+          },
+          "404": { "description": "You are not a moderator" }
+        }
+      }
+    },
+    "/admin/reports/{id}": {
+      "post": {
+        "tags": ["moderation"],
+        "summary": "Decide a report",
+        "description": "Suspending the account is a separate flag from the decision, so nobody is suspended by a dropdown.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": ["open", "reviewing", "actioned", "dismissed"]
+                  },
+                  "resolution": {
+                    "type": "string",
+                    "description": "What you decided and why, for whoever looks next."
+                  },
+                  "suspend": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Recorded" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "description": "No such report, or you are not a moderator" }
+        }
+      }
+    }
+  }
+}

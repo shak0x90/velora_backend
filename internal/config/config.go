@@ -30,6 +30,10 @@ type Config struct {
 	// media.Store implementation and these two values.
 	MediaRoot    string
 	MediaBaseURL string
+	// EnableAPIDocs serves the OpenAPI document and the browser explorer.
+	// Off in production by default: the explorer has a "try it" button, and an
+	// unauthenticated map of every endpoint is a gift to whoever is probing.
+	EnableAPIDocs bool
 }
 
 func (c Config) IsProduction() bool { return c.Env == "production" }
@@ -50,6 +54,9 @@ func Load() (Config, error) {
 		MediaRoot:       getString("MEDIA_ROOT", "/var/www/velora-media"),
 		MediaBaseURL:    getString("MEDIA_BASE_URL", "http://localhost:8080/media"),
 	}
+	// Defaults to on outside production, so a fresh clone has the explorer
+	// without anyone reading the README to find it.
+	cfg.EnableAPIDocs = getBool("ENABLE_API_DOCS", !cfg.IsProduction())
 
 	var missing []string
 	if cfg.DatabaseURL == "" {
@@ -89,6 +96,17 @@ func getDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+func getBool(key string, fallback bool) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func getList(key string, fallback []string) []string {

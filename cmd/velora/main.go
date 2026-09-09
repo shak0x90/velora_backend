@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shak0x90/velora_backend/internal/apidocs"
 	"github.com/shak0x90/velora_backend/internal/auth"
 	"github.com/shak0x90/velora_backend/internal/config"
 	"github.com/shak0x90/velora_backend/internal/db"
@@ -165,6 +166,11 @@ func serve(cfg config.Config) error {
 	discovery.New(profileService, authService.RequireAuth).Routes(mux)
 	social.New(pool, authService).Routes(mux)
 	safety.New(pool, authService).Routes(mux)
+
+	if cfg.EnableAPIDocs {
+		apidocs.Routes(mux)
+		slog.Info("api explorer enabled", "path", "/docs")
+	}
 
 	// Middleware runs outermost first: recover before logging, so a panic is
 	// still reported as a completed request with a 500.
