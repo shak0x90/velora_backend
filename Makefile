@@ -1,9 +1,10 @@
-.PHONY: help run work test cover lint build up down logs migrate tidy
+.PHONY: help run work test cover lint build up down logs migrate tidy apitest
 
 help:
 	@echo "run      Start the API locally (reads .env)"
 	@echo "work     Start the background worker"
-	@echo "test     Run all tests"
+	@echo "test     Run all unit tests"
+	@echo "apitest  Run the API checks against a running server"
 	@echo "cover    Run tests with a coverage summary"
 	@echo "lint     go vet + gofmt check"
 	@echo "build    Build ./bin/velora"
@@ -24,6 +25,11 @@ migrate:
 test:
 	go test ./...
 
+# Against a live server, so it needs one running. VELORA_API_URL overrides the
+# default of http://127.0.0.1:8080 — on the box, that default is what you want.
+apitest:
+	go run ./cmd/apitest suite $(SUITE)
+
 cover:
 	go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1
 
@@ -33,6 +39,7 @@ lint:
 
 build:
 	go build -trimpath -o bin/velora ./cmd/velora
+	go build -trimpath -o bin/apitest ./cmd/apitest
 
 up:
 	docker compose -f deploy/docker-compose.yml up -d --build
