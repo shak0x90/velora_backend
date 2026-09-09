@@ -231,7 +231,8 @@ func (s *Service) LoadOne(ctx context.Context, viewer domain.Profile, id string)
 		return s.Load(ctx, id)
 	}
 	found, err := s.query(ctx,
-		"user_id = $1 and hidden = false", []any{id}, s.pointFor(ctx, viewer.ID), 1)
+		"user_id = $1 and hidden = false and "+strings.Replace(notBlocked, "$1", "$2", -1),
+		[]any{id, viewer.ID}, s.pointFor(ctx, viewer.ID), 1)
 	if err != nil {
 		return domain.Profile{}, err
 	}
@@ -241,8 +242,23 @@ func (s *Service) LoadOne(ctx context.Context, viewer domain.Profile, id string)
 	return found[0], nil
 }
 
+// notBlocked hides a pair from each other in both directions.
+//
+// A block is stored one way but has to read both ways: the person who blocked
+// should not see the blocked, and the blocked must not be able to see them
+// either, or blocking would announce itself by what stops appearing. Every
+// read path that can surface another person includes this — the feed, search,
+// the batch lookup, and the single profile — because a block that holds in
+// three places out of four is not a block.
+const notBlocked = `
+	not exists (
+		select 1 from blocks
+		where (user_id = $1 and blocked_id = profiles.user_id)
+		   or (user_id = profiles.user_id and blocked_id = $1)
+	)`
+
 // candidateWhere is who may still appear in a feed: everyone except yourself,
-// the hidden, and anyone you have already decided about.
+// the hidden, the blocked, and anyone you have already decided about.
 //
 // Those decisions are excluded in SQL rather than in Go because they are the
 // cheapest filter available — an index lookup per row, against sets that grow
@@ -256,7 +272,8 @@ const candidateWhere = `
 		select 1 from matches
 		where user_a = least($1::uuid, profiles.user_id)
 		  and user_b = greatest($1::uuid, profiles.user_id)
-	)`
+	)
+	and ` + notBlocked
 
 // Candidates returns everyone the viewer could still be shown, most recently
 // active first. Ranking happens in Go afterwards: the scoring engine is shared
@@ -299,7 +316,8 @@ func (s *Service) LoadMany(ctx context.Context, viewer domain.Profile, ids []str
 		return []domain.Profile{}, nil
 	}
 	return s.query(ctx,
-		"user_id = any($1) and (hidden = false or user_id = $2)",
+		"user_id = any($1) and (hidden = false or user_id = $2) and "+
+			strings.Replace(notBlocked, "$1", "$2", -1),
 		[]any{ids, viewer.ID}, s.pointFor(ctx, viewer.ID), 0)
 }
 

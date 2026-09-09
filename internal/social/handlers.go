@@ -111,6 +111,13 @@ func translate(err error) error {
 		return httpx.NotFound("That profile is no longer available.")
 	case errors.Is(err, ErrNoSuchLike):
 		return httpx.NotFound("That like is not yours, or is already gone.")
+	case errors.Is(err, ErrBlocked):
+		// Same wording a deleted profile gets, deliberately. Which of the two
+		// happened is not the caller's business.
+		return httpx.NotFound("That profile is no longer available.")
+	case errors.Is(err, ErrTooMany):
+		return httpx.TooManyRequests(
+			"That is today's likes used up. More tomorrow, or any time with Plus.")
 	case err != nil && strings.Contains(err.Error(), "is not a kind of like"):
 		return httpx.BadRequest("That is not a kind of like we recognise.")
 	default:

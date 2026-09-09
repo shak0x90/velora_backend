@@ -27,6 +27,7 @@ import (
 	"github.com/shak0x90/velora_backend/internal/httpx"
 	"github.com/shak0x90/velora_backend/internal/media"
 	"github.com/shak0x90/velora_backend/internal/profile"
+	"github.com/shak0x90/velora_backend/internal/safety"
 	"github.com/shak0x90/velora_backend/internal/social"
 )
 
@@ -158,6 +159,7 @@ func serve(cfg config.Config) error {
 	// pool, so there is one definition of how a row becomes a Profile.
 	discovery.New(profileService, authService.RequireAuth).Routes(mux)
 	social.New(pool, authService).Routes(mux)
+	safety.New(pool, authService).Routes(mux)
 
 	// Middleware runs outermost first: recover before logging, so a panic is
 	// still reported as a completed request with a 500.

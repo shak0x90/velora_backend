@@ -29,7 +29,18 @@ var (
 	ErrSelfDirected = errors.New("you cannot do that to your own profile")
 	ErrNoSuchPerson = errors.New("no such person")
 	ErrNoSuchLike   = errors.New("no such like")
+	// ErrBlocked is a like aimed at someone either side has blocked. The
+	// message never says which direction: telling someone they were blocked is
+	// exactly the information a block is meant to withhold.
+	ErrBlocked = errors.New("not available")
+	ErrTooMany = errors.New("daily limit reached")
 )
+
+// MaxLikesPerDayFree is the spam limit. A person swiping attentively will not
+// reach it in a day; a script reaches it in seconds. Premium lifts it, which
+// is also why the cap cannot be the only thing standing between the app and
+// abuse — it is a speed bump, not a wall.
+const MaxLikesPerDayFree = 60
 
 // newMatchWindow is how long a match counts as new. The clients badge fresh
 // matches; once messaging lands this becomes "no messages yet" instead, which
@@ -109,6 +120,10 @@ func (s *Service) Like(ctx context.Context, userID string, input LikeInput) (Lik
 		label = "Liked your profile"
 	}
 
+	if err := s.underLikeLimit(ctx, userID); err != nil {
+		return LikeResult{}, err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return LikeResult{}, err
@@ -131,6 +146,22 @@ func (s *Service) Like(ctx context.Context, userID string, input LikeInput) (Lik
 		`select pg_advisory_xact_lock(hashtext($1 || $2)::bigint)`,
 		lockLow, lockHigh); err != nil {
 		return LikeResult{}, err
+	}
+
+	// Checked inside the transaction, after the lock: a block landing between
+	// the check and the insert would otherwise slip a like past it.
+	var blocked bool
+	if err := tx.QueryRow(ctx, `
+		select exists (
+			select 1 from blocks
+			where (user_id = $1 and blocked_id = $2)
+			   or (user_id = $2 and blocked_id = $1)
+		)
+	`, userID, input.ProfileID).Scan(&blocked); err != nil {
+		return LikeResult{}, translateFK(err)
+	}
+	if blocked {
+		return LikeResult{}, ErrBlocked
 	}
 
 	// A repeat like updates the existing row rather than adding one, so the
@@ -230,6 +261,27 @@ func createMatch(ctx context.Context, tx pgx.Tx, viewer, other string) (domain.M
 	return domain.MatchRecord{
 		ID: id, ProfileID: other, CreatedAt: createdAt, IsNew: true,
 	}, nil
+}
+
+// underLikeLimit caps how many people a free account can like in a day.
+//
+// Only new likes count. Re-liking someone you already liked updates a row
+// rather than adding one, and should not spend today's allowance.
+func (s *Service) underLikeLimit(ctx context.Context, userID string) error {
+	var premium bool
+	var today int
+	if err := s.pool.QueryRow(ctx, `
+		select u.is_premium,
+		       (select count(*) from likes
+		        where from_user_id = $1 and created_at > now() - interval '1 day')
+		from users u where u.id = $1
+	`, userID).Scan(&premium, &today); err != nil {
+		return translateFK(err)
+	}
+	if !premium && today >= MaxLikesPerDayFree {
+		return ErrTooMany
+	}
+	return nil
 }
 
 // Likes lists one direction. Priority likes sort first: that is what someone
