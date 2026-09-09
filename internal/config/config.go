@@ -30,6 +30,11 @@ type Config struct {
 	// media.Store implementation and these two values.
 	MediaRoot    string
 	MediaBaseURL string
+	// RegisterPerHour caps new accounts from one address. Generous for a person
+	// testing, ruinous for a script filling the database.
+	RegisterPerHour int
+	// RequestsPerMinute is the ceiling on everything, per address.
+	RequestsPerMinute int
 	// EnableAPIDocs serves the OpenAPI document and the browser explorer.
 	// Off in production by default: the explorer has a "try it" button, and an
 	// unauthenticated map of every endpoint is a gift to whoever is probing.
@@ -57,6 +62,8 @@ func Load() (Config, error) {
 	// Defaults to on outside production, so a fresh clone has the explorer
 	// without anyone reading the README to find it.
 	cfg.EnableAPIDocs = getBool("ENABLE_API_DOCS", !cfg.IsProduction())
+	cfg.RegisterPerHour = getInt("REGISTER_PER_HOUR", 20)
+	cfg.RequestsPerMinute = getInt("REQUESTS_PER_MINUTE", 600)
 
 	var missing []string
 	if cfg.DatabaseURL == "" {

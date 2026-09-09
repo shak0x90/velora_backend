@@ -79,19 +79,33 @@ var page = `<!doctype html>
     background: #f5ece7; padding: 1px 5px; border-radius: 4px;
     word-break: break-all;
   }
+  .velora-detail {
+    margin-top: 12px; padding: 14px 16px;
+    background: #f8f2ee; border: 1px solid #ecdfd8; border-radius: 12px;
+    font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #4a3129; max-width: 74ch;
+  }
+  .velora-detail dt {
+    color: #8a7168; font-weight: 600; float: left; width: 9em; clear: left;
+  }
+  .velora-detail dd { margin: 0 0 2px 9em; word-break: break-all; }
+  .velora-detail .next {
+    margin: 10px 0 0; padding-top: 10px; border-top: 1px solid #ecdfd8;
+    font-family: system-ui, sans-serif; line-height: 1.6;
+  }
+  .velora-warn {
+    margin-top: 14px !important; padding: 10px 14px;
+    background: #fdf3f1; border-left: 3px solid #c45d4b; border-radius: 4px;
+  }
 </style>
 </head>
 <body>
 <div class="velora-note">
   <h1>Velora API</h1>
   <p>
-    Most endpoints need an account. Press the button and you will have one —
-    it registers a throwaway address and authorizes this page with the token.
-  </p>
-  <p>
-    Signing in through <code>POST /auth/register</code>, <code>/auth/login</code>
-    or <code>/auth/refresh</code> below also authorizes automatically, so you
-    never have to copy a token by hand.
+    Most endpoints need an account. The button below makes you a complete one —
+    a real row in the database, with a filled-in profile — and authorizes this
+    page with its token, so every endpoint works immediately.
   </p>
   <div class="velora-actions">
     <button class="velora-btn" id="velora-signin" type="button">
@@ -99,9 +113,18 @@ var page = `<!doctype html>
     </button>
     <span class="velora-status" id="velora-status"></span>
   </div>
+  <div class="velora-detail" id="velora-detail" hidden></div>
   <p>
-    Everything here writes to a real database. Use throwaway addresses, and do
-    not paste a password you use anywhere else — this server is plain HTTP.
+    Signing in through <code>POST /auth/register</code>, <code>/auth/login</code>
+    or <code>/auth/refresh</code> below also authorizes automatically, so you
+    never have to copy a token by hand.
+  </p>
+  <p class="velora-warn">
+    <strong>This writes to the real database.</strong> Accounts made here are
+    permanent until someone deletes them, and every like, block and report you
+    send is a real row. Use it on the test server, not against anything you
+    care about — and never paste a password you use elsewhere, because this
+    server is plain HTTP.
   </p>
 </div>
 <div id="swagger"></div>
@@ -164,34 +187,109 @@ var page = `<!doctype html>
     },
   });
 
+  // A bare account is not much use: almost every endpoint answers 409 until a
+  // profile exists, which reads like a broken API rather than an unfinished
+  // signup. So this registers *and* onboards, and then says exactly what it
+  // made — the point of a test tool is that nothing about it is a mystery.
+  var FIRST_NAMES = ["Robin", "Sam", "Alex", "Jordan", "Casey", "Riley", "Quinn"];
+
+  function esc(text) {
+    return String(text).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  function describe(details) {
+    var rows = "";
+    for (var i = 0; i < details.rows.length; i++) {
+      rows += "<dt>" + esc(details.rows[i][0]) + "</dt><dd>" +
+              esc(details.rows[i][1]) + "</dd>";
+    }
+    var box = document.getElementById("velora-detail");
+    box.innerHTML = "<dl>" + rows + "</dl>" +
+      "<p class=\"next\">" + details.next + "</p>";
+    box.hidden = false;
+  }
+
+  function post(path, body, token) {
+    var headers = { "content-type": "application/json" };
+    if (token) headers.authorization = "Bearer " + token;
+    return fetch(API_BASE + path, {
+      method: "POST",
+      headers: headers,
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (parsed) {
+        if (!r.ok) {
+          throw new Error(parsed.detail || (path + " answered " + r.status));
+        }
+        return parsed;
+      });
+    });
+  }
+
   document.getElementById("velora-signin").addEventListener("click", function () {
     var button = this;
-    var email = "try+" + Math.random().toString(36).slice(2, 10) + "@velora.test";
+    var suffix = Math.random().toString(36).slice(2, 8);
+    var email = "try+" + suffix + "@velora.test";
+    var name = FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)];
+    var session = null;
+
     button.disabled = true;
     status.textContent = "Creating " + email + "…";
 
-    fetch(API_BASE + "/auth/register", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: email, password: "disposable-test-pw" }),
-    })
-      .then(function (r) {
-        return r.json().then(function (body) {
-          return { ok: r.ok, body: body };
+    post("/auth/register", { email: email, password: "disposable-test-pw" })
+      .then(function (registered) {
+        session = registered;
+        authorize(session.accessToken);
+        status.textContent = "Filling in a profile…";
+        return post("/me/onboarding", {
+          firstName: name,
+          dateOfBirth: "1994-06-15",
+          gender: "woman",
+          pronouns: "she/her",
+          city: "Brooklyn",
+          neighborhood: "Fort Greene",
+          occupation: "Ceramicist",
+          education: "NYU",
+          bio: "A test account. Kiln on weekends, tacos after, and strong opinions about the G train.",
+          interests: ["Books", "Coffee", "Hiking", "Art", "Travel", "Food"],
+          relationshipIntent: "longTerm",
+          communicationStyle: "thoughtful",
+          preferences: {
+            interestedIn: ["woman", "man", "nonBinary", "other"],
+            minAge: 18,
+            maxAge: 99,
+            maxDistanceKm: 500,
+          },
+          lifestyle: { languages: ["English"], heightCm: 170 },
+          prompts: [
+            { id: "p1", question: "A perfect Sunday", answer: "Kiln, then tacos." },
+          ],
+        }, session.accessToken);
+      })
+      .then(function (me) {
+        status.innerHTML = "<strong>Authorized.</strong> Every request below now runs as this account.";
+        describe({
+          rows: [
+            ["Name", me.profile.firstName + ", " + me.profile.age],
+            ["Email", email],
+            ["Password", "disposable-test-pw"],
+            ["Profile id", me.profile.id],
+            ["Sees", "everyone, 18-99, within 500 km"],
+            ["Token expires", new Date(Date.now() + 15 * 60000).toLocaleTimeString()],
+          ],
+          next:
+            "Preferences are deliberately wide open so <code>GET /discover</code> " +
+            "returns other test accounts rather than nothing. Try <code>GET /me</code>, " +
+            "then <code>GET /discover</code>, then <code>POST /likes</code> with an id " +
+            "from the feed. Press the button again for a second account if you want to " +
+            "watch two of them match.",
         });
       })
-      .then(function (result) {
-        if (!result.ok || !result.body.accessToken) {
-          // Show what the server actually said rather than a generic failure;
-          // this button is a debugging tool and hiding the reason defeats it.
-          throw new Error(result.body.detail || "the server refused the request");
-        }
-        authorize(result.body.accessToken);
-        status.innerHTML =
-          "<strong>Authorized as " + email + "</strong> — " +
-          "the account has no profile yet, so start with <code>POST /me/onboarding</code>.";
-      })
       .catch(function (error) {
+        // Say what the server said. This is a debugging tool; a generic
+        // failure message defeats the whole point of it.
         status.textContent = "That did not work: " + error.message;
       })
       .finally(function () {

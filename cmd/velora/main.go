@@ -172,9 +172,23 @@ func serve(cfg config.Config) error {
 		slog.Info("api explorer enabled", "path", "/docs")
 	}
 
+	// Rate limits sit innermost, so the outer layers still log and trace a
+	// rejected request.
+	//
+	// Registration is the one that matters: public by necessity, and every
+	// call writes a row. The rest of /auth is looser but still bounded, since
+	// an unlimited login endpoint is a password-guessing endpoint. The global
+	// ceiling is generous enough that no real client meets it and low enough
+	// that one address cannot saturate a small box.
+	var handler http.Handler = mux
+	handler = httpx.LimitPaths(
+		httpx.NewLimiter(cfg.RegisterPerHour, time.Hour), "/auth/register")(handler)
+	handler = httpx.LimitPaths(
+		httpx.NewLimiter(60, 15*time.Minute), "/auth/")(handler)
+	handler = httpx.NewLimiter(cfg.RequestsPerMinute, time.Minute).Middleware(handler)
+
 	// Middleware runs outermost first: recover before logging, so a panic is
 	// still reported as a completed request with a 500.
-	var handler http.Handler = mux
 	handler = httpx.CORS(cfg.AllowedOrigins)(handler)
 	handler = httpx.Logger(handler)
 	handler = httpx.Recoverer(handler)
