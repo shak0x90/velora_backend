@@ -288,11 +288,19 @@ func (s *Service) Search(ctx context.Context, viewer domain.Profile, query strin
 
 // LoadMany reads a specific set of profiles, measured from the viewer. The
 // likes and matches screens use it, where the ids come from another table.
+//
+// Hidden profiles are excluded on the same terms as LoadOne. Without that, the
+// batch form was a way around the visibility check: anyone holding an id could
+// read a profile its owner had hidden, simply by asking for several at once.
+// The viewer is the exception, since hiding yourself should not hide you from
+// yourself.
 func (s *Service) LoadMany(ctx context.Context, viewer domain.Profile, ids []string) ([]domain.Profile, error) {
 	if len(ids) == 0 {
 		return []domain.Profile{}, nil
 	}
-	return s.query(ctx, "user_id = any($1)", []any{ids}, s.pointFor(ctx, viewer.ID), 0)
+	return s.query(ctx,
+		"user_id = any($1) and (hidden = false or user_id = $2)",
+		[]any{ids, viewer.ID}, s.pointFor(ctx, viewer.ID), 0)
 }
 
 // pointFor reads the viewer's coordinates. A missing location is not an error

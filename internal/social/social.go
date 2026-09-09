@@ -115,6 +115,24 @@ func (s *Service) Like(ctx context.Context, userID string, input LikeInput) (Lik
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Serialise on the pair before touching either row.
+	//
+	// Two people liking each other at the same instant would otherwise each
+	// insert their like and then look for the other's, which is still
+	// uncommitted and therefore invisible at read committed. Both would commit
+	// happily and neither would match — the worst possible failure here, since
+	// the app would have silently thrown away a mutual like. The key is built
+	// from the ordered pair so both sides queue on the same lock.
+	lockLow, lockHigh := userID, input.ProfileID
+	if lockLow > lockHigh {
+		lockLow, lockHigh = lockHigh, lockLow
+	}
+	if _, err := tx.Exec(ctx,
+		`select pg_advisory_xact_lock(hashtext($1 || $2)::bigint)`,
+		lockLow, lockHigh); err != nil {
+		return LikeResult{}, err
+	}
+
 	// A repeat like updates the existing row rather than adding one, so the
 	// recipient's list cannot fill with the same person twice.
 	if _, err := tx.Exec(ctx, `

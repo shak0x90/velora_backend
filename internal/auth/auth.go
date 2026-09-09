@@ -264,9 +264,16 @@ func (s *Service) Refresh(ctx context.Context, presented string) (Session, error
 	var expiresAt time.Time
 	var usedAt, revokedAt *time.Time
 
+	// `for update` is load-bearing, not a precaution. Reading the row and then
+	// marking it spent are two statements: without the lock, two concurrent
+	// refreshes both observe used_at as null and both issue a session, so one
+	// token buys two. The second caller now blocks until the first commits and
+	// then takes the reuse path below, which is the honest outcome — we cannot
+	// tell a racing client from a stolen token.
 	err = tx.QueryRow(ctx, `
 		select id, user_id, family_id, expires_at, used_at, revoked_at
 		from refresh_tokens where token_hash = $1
+		for update
 	`, sum[:]).Scan(&id, &userID, &familyID, &expiresAt, &usedAt, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrInvalidToken

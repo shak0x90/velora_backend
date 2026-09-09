@@ -39,11 +39,15 @@ var variantWidths = map[Variant]int{
 var AllVariants = []Variant{VariantFull, VariantCard, VariantThumb}
 
 const (
-	// MaxUploadBytes caps what we will decode. A decoder handed an enormous
-	// image will happily allocate until the box dies, so this is a memory
-	// guard as much as a policy.
+	// MaxUploadBytes caps the bytes on the wire.
 	MaxUploadBytes = 10 << 20 // 10 MB
-	jpegQuality    = 82
+	// MaxPixels caps the decoded bitmap, which is the number that actually
+	// governs memory. Compression ratio is unbounded: a few hundred kilobytes
+	// of PNG can describe a 40000x40000 canvas, and decoding it asks for
+	// roughly six gigabytes on a box with four. Thirty megapixels clears every
+	// phone and most full-frame cameras while capping a decode at ~120 MB.
+	MaxPixels   = 30_000_000
+	jpegQuality = 82
 )
 
 var ErrUnsupportedImage = errors.New("unsupported image: send a JPEG, PNG, or WebP")
@@ -122,6 +126,22 @@ func Process(userID string, raw []byte) ([]Derived, error) {
 	}
 	if len(raw) > MaxUploadBytes {
 		return nil, fmt.Errorf("image is larger than %d MB", MaxUploadBytes>>20)
+	}
+
+	// Read the header before the pixels. DecodeConfig parses dimensions without
+	// allocating the bitmap, which is the only chance to refuse an image that
+	// is small on disk and enormous in memory.
+	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, ErrUnsupportedImage
+	}
+	if config.Width <= 0 || config.Height <= 0 {
+		return nil, ErrUnsupportedImage
+	}
+	if int64(config.Width)*int64(config.Height) > MaxPixels {
+		return nil, fmt.Errorf(
+			"image is %dx%d; the limit is %d megapixels",
+			config.Width, config.Height, MaxPixels/1_000_000)
 	}
 
 	src, err := imaging.Decode(bytes.NewReader(raw), imaging.AutoOrientation(true))
