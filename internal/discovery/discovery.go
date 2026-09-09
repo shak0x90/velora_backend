@@ -36,9 +36,13 @@ func New(profiles *profile.Service, guard func(http.Handler) http.Handler) *Serv
 	return &Service{profiles: profiles, guard: guard}
 }
 
-// ErrNoProfile is re-exported so handlers can answer "finish onboarding first"
-// without importing the profile package for a single sentinel.
-var ErrNoProfile = profile.ErrNoProfile
+// Re-exported so handlers can tell the two apart without importing the profile
+// package for a pair of sentinels: ErrNoProfile is the caller's own onboarding
+// being unfinished, ErrNotFound is somebody else being absent or hidden.
+var (
+	ErrNoProfile = profile.ErrNoProfile
+	ErrNotFound  = profile.ErrNotFound
+)
 
 // viewer loads the caller's own profile, which every ranking needs: a score is
 // always relative to somebody.

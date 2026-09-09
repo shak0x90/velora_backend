@@ -236,7 +236,7 @@ func (s *Service) LoadOne(ctx context.Context, viewer domain.Profile, id string)
 		return domain.Profile{}, err
 	}
 	if len(found) == 0 {
-		return domain.Profile{}, ErrNoProfile
+		return domain.Profile{}, ErrNotFound
 	}
 	return found[0], nil
 }

@@ -132,6 +132,8 @@ func splitIDs(raw string) []string {
 // translate maps the errors this package surfaces onto problem documents.
 func translate(err error) error {
 	switch {
+	case errors.Is(err, ErrNotFound):
+		return httpx.NotFound("That profile is no longer available.")
 	case errors.Is(err, ErrNoProfile):
 		return httpx.Problem{
 			Type:   "about:blank#no-profile",

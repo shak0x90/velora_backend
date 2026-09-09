@@ -32,6 +32,12 @@ import (
 // wizard instead of the feed.
 var ErrNoProfile = errors.New("no profile yet")
 
+// ErrNotFound is a profile that does not exist, or is hidden from the caller.
+// Distinct from ErrNoProfile on purpose: conflating them reports someone
+// else's absence as your own unfinished onboarding, which is both the wrong
+// status code and a confusing thing to read.
+var ErrNotFound = errors.New("profile not found")
+
 type Service struct {
 	pool   *pgxpool.Pool
 	photos *media.Service
