@@ -65,17 +65,40 @@ var page = `<!doctype html>
   .velora-note h1 { margin: 0 0 6px; font-size: 18px; }
   .velora-note code { background: #f5ece7; padding: 1px 5px; border-radius: 4px; }
   .velora-note p { margin: 6px 0 0; max-width: 74ch; }
+  .velora-actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .velora-btn {
+    font: 600 14px system-ui, sans-serif; cursor: pointer;
+    background: #c45d4b; color: #fff; border: 0;
+    border-radius: 999px; padding: 10px 18px;
+  }
+  .velora-btn:hover { background: #a94a3a; }
+  .velora-btn[disabled] { opacity: .6; cursor: default; }
+  .velora-status { font: 14px/1.5 system-ui, sans-serif; color: #6b544c; }
+  .velora-status strong { color: #2e7d5b; }
+  .velora-status code {
+    background: #f5ece7; padding: 1px 5px; border-radius: 4px;
+    word-break: break-all;
+  }
 </style>
 </head>
 <body>
 <div class="velora-note">
   <h1>Velora API</h1>
   <p>
-    To call anything that needs an account: expand
-    <code>POST /auth/register</code> or <code>POST /auth/login</code>, run it,
-    copy <code>accessToken</code> from the response, then press
-    <strong>Authorize</strong> at the top right and paste it.
+    Most endpoints need an account. Press the button and you will have one —
+    it registers a throwaway address and authorizes this page with the token.
   </p>
+  <p>
+    Signing in through <code>POST /auth/register</code>, <code>/auth/login</code>
+    or <code>/auth/refresh</code> below also authorizes automatically, so you
+    never have to copy a token by hand.
+  </p>
+  <div class="velora-actions">
+    <button class="velora-btn" id="velora-signin" type="button">
+      Create a test account and authorize
+    </button>
+    <span class="velora-status" id="velora-status"></span>
+  </div>
   <p>
     Everything here writes to a real database. Use throwaway addresses, and do
     not paste a password you use anywhere else — this server is plain HTTP.
@@ -84,6 +107,36 @@ var page = `<!doctype html>
 <div id="swagger"></div>
 <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" crossorigin></script>
 <script>
+  // The page is served at /docs, at /api/docs, and at /apitest. Only the
+  // middle two sit behind the nginx prefix, so the button has to reach the
+  // same base URL the spec's server dropdown defaults to.
+  var API_BASE =
+    location.pathname.indexOf("/apitest") === 0 || location.pathname.indexOf("/api/") === 0
+      ? "/api"
+      : "";
+
+  var status = document.getElementById("velora-status");
+
+  function authorize(token) {
+    window.ui.authActions.authorize({
+      bearerAuth: {
+        name: "bearerAuth",
+        schema: { type: "http", scheme: "bearer" },
+        value: token,
+      },
+    });
+  }
+
+  function tokenFrom(response) {
+    try {
+      var body = response.body;
+      if (!body && response.text) body = JSON.parse(response.text);
+      return body && body.accessToken ? body.accessToken : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   window.ui = SwaggerUIBundle({
     spec: SPEC_PLACEHOLDER,
     dom_id: "#swagger",
@@ -93,6 +146,57 @@ var page = `<!doctype html>
     displayRequestDuration: true,
     defaultModelsExpandDepth: 0,
     docExpansion: "list",
+    // Signing in from any of the auth endpoints authorizes the page. Copying a
+    // token by hand is a step with no purpose beyond giving someone the chance
+    // to paste the wrong one.
+    responseInterceptor: function (response) {
+      if (
+        response.status >= 200 && response.status < 300 &&
+        /\/auth\/(register|login|refresh|social)(\?|$)/.test(response.url || "")
+      ) {
+        var token = tokenFrom(response);
+        if (token) {
+          authorize(token);
+          status.innerHTML = "<strong>Authorized.</strong> Every endpoint below will use this token.";
+        }
+      }
+      return response;
+    },
+  });
+
+  document.getElementById("velora-signin").addEventListener("click", function () {
+    var button = this;
+    var email = "try+" + Math.random().toString(36).slice(2, 10) + "@velora.test";
+    button.disabled = true;
+    status.textContent = "Creating " + email + "…";
+
+    fetch(API_BASE + "/auth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: email, password: "disposable-test-pw" }),
+    })
+      .then(function (r) {
+        return r.json().then(function (body) {
+          return { ok: r.ok, body: body };
+        });
+      })
+      .then(function (result) {
+        if (!result.ok || !result.body.accessToken) {
+          // Show what the server actually said rather than a generic failure;
+          // this button is a debugging tool and hiding the reason defeats it.
+          throw new Error(result.body.detail || "the server refused the request");
+        }
+        authorize(result.body.accessToken);
+        status.innerHTML =
+          "<strong>Authorized as " + email + "</strong> — " +
+          "the account has no profile yet, so start with <code>POST /me/onboarding</code>.";
+      })
+      .catch(function (error) {
+        status.textContent = "That did not work: " + error.message;
+      })
+      .finally(function () {
+        button.disabled = false;
+      });
   });
 </script>
 </body>
