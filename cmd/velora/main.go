@@ -57,6 +57,8 @@ func run() error {
 		return work(cfg)
 	case "migrate":
 		return migrate(cfg)
+	case "moderator":
+		return moderator(cfg, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -73,6 +75,9 @@ Usage:
   velora serve     Start the HTTP and WebSocket API
   velora work      Start the background job worker
   velora migrate   Apply database migrations and exit
+
+  velora moderator <email>          Let this account read the report queue
+  velora moderator --revoke <email> Take that away
 
 Configuration is read from the environment; see .env.example.
 `)
@@ -209,6 +214,52 @@ func work(cfg config.Config) error {
 	defer stop()
 	<-ctx.Done()
 	slog.Info("worker stopped")
+	return nil
+}
+
+// moderator grants or revokes access to the report queue.
+//
+// A subcommand rather than an endpoint on purpose: the first moderator has to
+// come from somewhere, and an API that can promote its own caller is a hole no
+// amount of guarding closes. Running this needs shell access to the box, which
+// is the same bar as reading the database directly.
+func moderator(cfg config.Config, args []string) error {
+	revoke := false
+	if len(args) > 0 && args[0] == "--revoke" {
+		revoke, args = true, args[1:]
+	}
+	if len(args) != 1 {
+		return errors.New("usage: velora moderator [--revoke] <email>")
+	}
+	email := strings.ToLower(strings.TrimSpace(args[0]))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	var userID string
+	err = pool.QueryRow(ctx, `
+		update users set is_moderator = $1
+		where id = (
+			select user_id from auth_identities
+			where method = 'email' and identifier = $2
+		)
+		returning id::text
+	`, !revoke, email).Scan(&userID)
+	if err != nil {
+		return fmt.Errorf("no account with the email %q", email)
+	}
+
+	if revoke {
+		slog.Info("moderator revoked", "email", email, "user", userID)
+	} else {
+		slog.Info("moderator granted", "email", email, "user", userID)
+	}
 	return nil
 }
 
