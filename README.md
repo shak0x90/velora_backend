@@ -208,6 +208,40 @@ serve; **R2 is the intended destination** but needs a custom domain to reach
 Cloudflare's edge — `r2.dev` is rate-limited and explicitly not for production.
 Swapping is one implementation plus `MEDIA_ROOT`/`MEDIA_BASE_URL`.
 
+## Testing the API
+
+`go test ./...` covers the pure logic and touches no database. Everything
+interesting — a block that leaks, a race that loses a match, a query that only
+misbehaves with real rows — needs a running server, which is what `apitest` is
+for.
+
+```bash
+make apitest                 # every check, against 127.0.0.1:8080
+make apitest SUITE=safety    # just one
+./bin/apitest list           # what the suites cover
+
+./bin/apitest call GET /me --as someone@velora.test
+./bin/apitest call POST /likes '{"profileId":"..."}' --as someone@velora.test
+./bin/apitest login someone@velora.test    # prints a bearer token
+```
+
+`call` signs in for you, registering the address if it is new, so poking one
+endpoint never starts with copying a token around. `VELORA_API_URL` overrides
+the target; the default is loopback, so running it on the box never reaches the
+public interface.
+
+Every check reproduces a behaviour rather than asserting a patch is present. A
+fix that compiles is not the same as a fix that holds, and several of these
+exist because the behaviour was once wrong. The concurrency cases — two
+goroutines spending one refresh token, two people liking each other at the same
+instant — are the reason this runs over HTTP at all; neither is reachable from
+a unit test, and both were broken when first checked.
+
+It creates throwaway `apitest+…@velora.test` accounts and cleans up after
+nothing, because the wreckage of a failed run is usually how you find out what
+happened. Point it only at a database you would not mind filling with rows
+named "Api SFA".
+
 ## Test server
 
 **http://89.167.77.99:8091** — `ssh root@89.167.77.99`, key auth.
