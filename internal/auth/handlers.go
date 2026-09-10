@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/shak0x90/velora_backend/internal/httpx"
 )
 
@@ -113,6 +115,29 @@ func (s *Service) RequireAuth(next http.Handler) http.Handler {
 		userID, err := s.ParseAccessToken(strings.TrimPrefix(header, "Bearer "))
 		if err != nil {
 			httpx.Error(w, r, httpx.Unauthorized("Your session expired. Sign in again."))
+			return
+		}
+		// A valid token is not the same as a live account.
+		//
+		// Access tokens last fifteen minutes and carry no status, so without
+		// this check a suspension takes effect whenever the holder's current
+		// token happens to expire — and the moderator who suspended them has
+		// no way to know when that is. One primary-key lookup per request is
+		// what it costs for a suspension to mean something immediately.
+		var status string
+		err = s.pool.QueryRow(r.Context(),
+			`select status from users where id = $1`, userID).Scan(&status)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			httpx.Error(w, r, httpx.Forbidden("This account is no longer available."))
+			return
+		case err != nil:
+			// A database fault is ours, not the caller's. Answering "forbidden"
+			// would send someone chasing a permission they already have.
+			httpx.Error(w, r, err)
+			return
+		case status != "active":
+			httpx.Error(w, r, httpx.Forbidden("This account is no longer available."))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userIDKey, userID)))

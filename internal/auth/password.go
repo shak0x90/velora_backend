@@ -75,10 +75,22 @@ func (s *Service) Register(ctx context.Context, rawEmail, rawPassword string) (S
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// An email row may already exist without a password — created as a side
-	// effect of Google sign-in. Treat that as "set a password on the existing
-	// account" rather than a conflict, so the same person doesn't end up with
-	// two accounts for one address.
+	// An email row may already exist without a password. Google sign-in records
+	// one as a side effect, so that a later email sign-in resolves to the same
+	// person instead of creating a second account for one address.
+	//
+	// Registration must not adopt it. Signing up proves someone can type an
+	// address, not that they own it — so setting a password on an existing
+	// identity and handing back that user's session is account takeover by
+	// anyone who knows their email address, and guessing which addresses have
+	// signed in with Google is not hard.
+	//
+	// Both cases are therefore refused identically, which also keeps the answer
+	// free of a new way to tell registered addresses apart. Adding a password
+	// to a Google account is a real need, but it belongs behind proof of
+	// ownership: an authenticated "set a password" endpoint, or a verification
+	// link once there is any way to send mail. Until one of those exists, the
+	// honest answer is that the address is taken.
 	var userID uuid.UUID
 	var existingHash []byte
 	err = tx.QueryRow(ctx, `
@@ -87,15 +99,8 @@ func (s *Service) Register(ctx context.Context, rawEmail, rawPassword string) (S
 	`, email).Scan(&userID, &existingHash)
 
 	switch {
-	case err == nil && existingHash != nil:
-		return Session{}, ErrEmailTaken
 	case err == nil:
-		if _, err := tx.Exec(ctx, `
-			update auth_identities set password_hash = $1, password_set_at = now()
-			where method = 'email' and identifier = $2
-		`, hash, email); err != nil {
-			return Session{}, err
-		}
+		return Session{}, ErrEmailTaken
 	case errors.Is(err, pgx.ErrNoRows):
 		userID = uuid.New()
 		if _, err := tx.Exec(ctx,

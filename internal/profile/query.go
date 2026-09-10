@@ -91,10 +91,10 @@ func scanProfile(row pgx.Row) (domain.Profile, error) {
 	var p domain.Profile
 	var interestedIn, intents []string
 	var heightCm *int
-	var lastActive time.Time
+	var lastActive, birth time.Time
 
 	err := row.Scan(
-		&p.ID, &p.FirstName, &p.DateOfBirth, &p.Gender, &p.Pronouns,
+		&p.ID, &p.FirstName, &birth, &p.Gender, &p.Pronouns,
 		&p.City, &p.Neighborhood, &p.Occupation, &p.Education, &p.Bio,
 		&p.Interests, &p.RelationshipIntent, &p.CommunicationStyle, &p.PersonalityTraits,
 		&p.Lifestyle.Exercise, &p.Lifestyle.Drinking, &p.Lifestyle.Smoking,
@@ -112,10 +112,28 @@ func scanProfile(row pgx.Row) (domain.Profile, error) {
 	p.Lifestyle.HeightCm = heightCm
 	p.Preferences.InterestedIn = toGenders(interestedIn)
 	p.Preferences.Intents = toIntents(intents)
-	p.Age = ageOn(p.DateOfBirth, time.Now())
-	p.LastActive = lastActive
+	// Both are derived before the pointers are set, so Public can drop the raw
+	// values without taking the answers with them.
+	p.Age = ageOn(birth, time.Now())
 	p.OnlineStatus = statusFrom(lastActive, time.Now())
+	p.DateOfBirth = &birth
+	p.LastActive = &lastActive
 	return p, nil
+}
+
+// publicise redacts everyone who is not the viewer.
+//
+// It runs at the loader boundary rather than in the handlers because there are
+// four ways to reach someone else's profile and only one of them has to be
+// forgotten for a birth date to escape. The viewer's own row passes through
+// whole: hiding your details from yourself would break your own editor.
+func publicise(profiles []domain.Profile, viewerID string) []domain.Profile {
+	for i := range profiles {
+		if profiles[i].ID != viewerID {
+			profiles[i] = profiles[i].Public()
+		}
+	}
+	return profiles
 }
 
 // enrich attaches photos, prompts and personality answers in three batched
@@ -231,7 +249,8 @@ func (s *Service) LoadOne(ctx context.Context, viewer domain.Profile, id string)
 		return s.Load(ctx, id)
 	}
 	found, err := s.query(ctx,
-		"user_id = $1 and hidden = false and "+strings.Replace(notBlocked, "$1", "$2", -1),
+		"user_id = $1 and hidden = false and "+activeAccount+" and "+
+			strings.Replace(notBlocked, "$1", "$2", -1),
 		[]any{id, viewer.ID}, s.pointFor(ctx, viewer.ID), 1)
 	if err != nil {
 		return domain.Profile{}, err
@@ -239,7 +258,7 @@ func (s *Service) LoadOne(ctx context.Context, viewer domain.Profile, id string)
 	if len(found) == 0 {
 		return domain.Profile{}, ErrNotFound
 	}
-	return found[0], nil
+	return found[0].Public(), nil
 }
 
 // notBlocked hides a pair from each other in both directions.
@@ -273,13 +292,47 @@ const candidateWhere = `
 		where user_a = least($1::uuid, profiles.user_id)
 		  and user_b = greatest($1::uuid, profiles.user_id)
 	)
+	and ` + incognitoVisible + `
+	and ` + activeAccount + `
 	and ` + notBlocked
+
+// activeAccount keeps suspended and deleted people out of every read.
+//
+// Suspending an account has to mean it stops appearing, not merely that its
+// owner stops being served. A profile that is still reachable is still doing
+// whatever the suspension was for, and the person who reported it watches it
+// stay up. The predicate names profiles.user_id explicitly so it can be
+// pasted into a query whose viewer parameter is $1 or $2.
+const activeAccount = `
+	exists (
+		select 1 from users u
+		where u.id = profiles.user_id and u.status = 'active'
+	)`
+
+// incognitoVisible is the promise the switch makes, in SQL.
+//
+// The interface says: browse without your visit being obvious, and you still
+// appear to people you like. So an incognito profile drops out of the feed and
+// out of search — but not for anyone it has already reached out to, because
+// hiding from someone you liked would make the like unanswerable.
+const incognitoVisible = `
+	(
+		incognito = false
+		or exists (
+			select 1 from likes
+			where from_user_id = profiles.user_id and to_user_id = $1
+		)
+	)`
 
 // Candidates returns everyone the viewer could still be shown, most recently
 // active first. Ranking happens in Go afterwards: the scoring engine is shared
 // with both clients and must stay one implementation, not two.
 func (s *Service) Candidates(ctx context.Context, viewer domain.Profile, limit int) ([]domain.Profile, error) {
-	return s.query(ctx, candidateWhere, []any{viewer.ID}, s.pointFor(ctx, viewer.ID), limit)
+	found, err := s.query(ctx, candidateWhere, []any{viewer.ID}, s.pointFor(ctx, viewer.ID), limit)
+	if err != nil {
+		return nil, err
+	}
+	return publicise(found, viewer.ID), nil
 }
 
 // Search narrows the candidate set by free text before ranking. The needle is
@@ -300,7 +353,11 @@ func (s *Service) Search(ctx context.Context, viewer domain.Profile, query strin
 			or bio          ilike '%' || $2 || '%'
 			or exists (select 1 from unnest(interests) i where i ilike '%' || $2 || '%')
 		)`
-	return s.query(ctx, where, []any{viewer.ID, needle}, s.pointFor(ctx, viewer.ID), limit)
+	found, err := s.query(ctx, where, []any{viewer.ID, needle}, s.pointFor(ctx, viewer.ID), limit)
+	if err != nil {
+		return nil, err
+	}
+	return publicise(found, viewer.ID), nil
 }
 
 // LoadMany reads a specific set of profiles, measured from the viewer. The
@@ -315,10 +372,15 @@ func (s *Service) LoadMany(ctx context.Context, viewer domain.Profile, ids []str
 	if len(ids) == 0 {
 		return []domain.Profile{}, nil
 	}
-	return s.query(ctx,
+	found, err := s.query(ctx,
 		"user_id = any($1) and (hidden = false or user_id = $2) and "+
+			"(user_id = $2 or "+activeAccount+") and "+
 			strings.Replace(notBlocked, "$1", "$2", -1),
 		[]any{ids, viewer.ID}, s.pointFor(ctx, viewer.ID), 0)
+	if err != nil {
+		return nil, err
+	}
+	return publicise(found, viewer.ID), nil
 }
 
 // pointFor reads the viewer's coordinates. A missing location is not an error

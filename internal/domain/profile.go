@@ -107,10 +107,12 @@ type DatingPreferences struct {
 }
 
 type Profile struct {
-	ID                 string              `json:"id"`
-	FirstName          string              `json:"firstName"`
-	Age                int                 `json:"age"`
-	DateOfBirth        time.Time           `json:"dateOfBirth"`
+	ID        string `json:"id"`
+	FirstName string `json:"firstName"`
+	Age       int    `json:"age"`
+	// DateOfBirth appears only on your own profile. Age is what a viewer
+	// needs; the exact date belongs to its owner, and Public strips it.
+	DateOfBirth        *time.Time          `json:"dateOfBirth,omitempty"`
 	Gender             Gender              `json:"gender"`
 	Pronouns           string              `json:"pronouns"`
 	City               string              `json:"city"`
@@ -131,9 +133,33 @@ type Profile struct {
 	PhotoVerified      bool                `json:"photoVerified"`
 	PhoneVerified      bool                `json:"phoneVerified"`
 	OnlineStatus       OnlineStatus        `json:"onlineStatus"`
-	LastActive         time.Time           `json:"lastActive"`
-	Incognito          bool                `json:"incognito,omitempty"`
-	Hidden             bool                `json:"hidden,omitempty"`
+	// LastActive appears only on your own profile, for the same reason as
+	// DateOfBirth. OnlineStatus carries the coarse version everyone else sees.
+	LastActive *time.Time `json:"lastActive,omitempty"`
+	Incognito  bool       `json:"incognito,omitempty"`
+	Hidden     bool       `json:"hidden,omitempty"`
+}
+
+// Public is the profile as somebody else may see it.
+//
+// Age and OnlineStatus already answer the questions a viewer has: how old
+// someone is, and roughly whether they are around. An exact birth date and the
+// precise minute of a last visit answer nothing anyone browsing needs, and both
+// are the kind of detail that turns identifying the moment it is combined with
+// anything else — a birth date is a permanent, unchangeable key to a person.
+//
+// Incognito and Hidden go too. They are the owner's settings rather than facts
+// about them, and leaking "this person is browsing invisibly" would defeat the
+// setting by announcing it.
+//
+// This is a copy, not a mutation: the caller keeps the full profile it loaded,
+// which matters because the compatibility engine runs before serialisation.
+func (p Profile) Public() Profile {
+	p.DateOfBirth = nil
+	p.LastActive = nil
+	p.Incognito = false
+	p.Hidden = false
+	return p
 }
 
 // CompatibilityResult is what the client renders as "why this match".
