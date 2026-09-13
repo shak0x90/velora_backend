@@ -45,6 +45,14 @@ func TooManyRequests(detail string) Problem {
 	return Problem{Type: "about:blank#rate-limited", Title: "Slow down", Status: http.StatusTooManyRequests, Detail: detail}
 }
 
+// Gone is for something that existed and deliberately no longer does — a
+// cursor pointing past the end of what is still kept, above all. It is
+// distinct from NotFound because the caller's own state is stale rather than
+// wrong, and the fix is to start again rather than to stop asking.
+func Gone(detail string) Problem {
+	return Problem{Type: "about:blank#gone", Title: "No longer available", Status: http.StatusGone, Detail: detail}
+}
+
 func Internal() Problem {
 	return Problem{
 		Type:   "about:blank#internal",

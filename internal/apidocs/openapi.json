@@ -225,8 +225,9 @@
           "unreadCount": {
             "type": "integer"
           },
-          "nextOffset": {
-            "type": "integer"
+          "nextCursor": {
+            "type": "string",
+            "description": "Opaque page cursor. Echo it back as ?cursor= to fetch the next page; absent when this is the last page."
           }
         },
         "required": [
@@ -727,12 +728,12 @@
         "description": "Returns up to 100 conversation summaries, never full histories. Anonymous peer profileId is omitted until both consent. unreadCount covers all conversations.",
         "parameters": [
           {
-            "name": "offset",
+            "name": "cursor",
             "in": "query",
+            "description": "Opaque cursor from a previous response's nextCursor. Omit for the first page.",
             "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 10000
+              "type": "string",
+              "maxLength": 100
             }
           }
         ]
@@ -770,12 +771,12 @@
         },
         "parameters": [
           {
-            "name": "offset",
+            "name": "cursor",
             "in": "query",
+            "description": "Opaque cursor from a previous response's nextCursor. Omit for the first page.",
             "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 10000
+              "type": "string",
+              "maxLength": 100
             }
           }
         ]

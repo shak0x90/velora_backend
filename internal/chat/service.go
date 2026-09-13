@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -32,8 +33,51 @@ func New(pool *pgxpool.Pool, users *auth.Service, origins []string, enqueue Enqu
 	s.hub = NewHub(s)
 	return s
 }
-func (s *Service) Run(ctx context.Context) { s.hub.Run(ctx) }
-func (s *Service) Close()                  { s.hub.Close() }
+
+// eventRetentionDays is how long a device may be offline and still catch up by
+// replaying events instead of reloading everything. Past it the cursor is
+// refused as stale, which is the same answer the client would reach anyway.
+const eventRetentionDays = 30
+
+func (s *Service) Run(ctx context.Context) {
+	go s.prune(ctx)
+	s.hub.Run(ctx)
+}
+
+// prune stops user_events growing without bound.
+//
+// Every message writes one row per participant, for ever, and nothing reads
+// them once both sides have caught up. Unpruned it becomes the largest table
+// in the database — gradually, and then suddenly, on the machine that is also
+// running five other people's applications.
+func (s *Service) prune(ctx context.Context) {
+	sweep := func() {
+		tag, err := s.pool.Exec(ctx,
+			`delete from user_events where created_at < now() - make_interval(days => $1)`,
+			eventRetentionDays)
+		if err != nil {
+			// Worth knowing about, not worth stopping serving for.
+			slog.Warn("chat event prune failed", "error", err)
+			return
+		}
+		if n := tag.RowsAffected(); n > 0 {
+			slog.Info("pruned chat events", "rows", n, "olderThanDays", eventRetentionDays)
+		}
+	}
+
+	sweep()
+	t := time.NewTicker(6 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sweep()
+		}
+	}
+}
+func (s *Service) Close() { s.hub.Close() }
 
 type thread struct {
 	ID, A, B, Origin, State, Requester string
@@ -81,7 +125,32 @@ func (s *Service) access(ctx context.Context, tx pgx.Tx, user, id string, lock b
 	return c, nil
 }
 
-func (s *Service) Bootstrap(ctx context.Context, user string, offset int) (Snapshot, error) {
+// parseInboxCursor reads a page cursor: the last row's activity timestamp and
+// conversation id, in the order the inbox is sorted. Empty means the first
+// page. Both halves are needed — timestamps tie, ids break the tie.
+func parseInboxCursor(raw string) (*time.Time, *string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil, nil
+	}
+	at, id, found := strings.Cut(raw, ",")
+	if !found {
+		return nil, nil, httpx.BadRequest("Invalid inbox cursor.")
+	}
+	stamp, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return nil, nil, httpx.BadRequest("Invalid inbox cursor.")
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, nil, httpx.BadRequest("Invalid inbox cursor.")
+	}
+	return &stamp, &id, nil
+}
+
+func (s *Service) Bootstrap(ctx context.Context, user, cursor string) (Snapshot, error) {
+	beforeAt, beforeID, err := parseInboxCursor(cursor)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return Snapshot{}, err
@@ -109,7 +178,8 @@ func (s *Service) Bootstrap(ctx context.Context, user string, offset int) (Snaps
  where me.user_id=$1 and c.state in ('open','pending')
  and not exists(select 1 from blocks where (user_id=$1 and blocked_id=other.user_id) or (user_id=other.user_id and blocked_id=$1))
  and (c.origin<>'match' or exists(select 1 from matches m where m.user_a=c.user_a and m.user_b=c.user_b))
- order by coalesce(c.last_message_at,c.created_at) desc,c.id desc limit 101 offset $2`, user, offset)
+ and ($2::timestamptz is null or (coalesce(c.last_message_at,c.created_at), c.id) < ($2::timestamptz, $3::uuid))
+ order by coalesce(c.last_message_at,c.created_at) desc,c.id desc limit 101`, user, beforeAt, beforeID)
 	if err != nil {
 		return out, err
 	}
@@ -129,7 +199,8 @@ func (s *Service) Bootstrap(ctx context.Context, user string, offset int) (Snaps
 	}
 	if len(out.Conversations) > 100 {
 		out.Conversations = out.Conversations[:100]
-		out.NextOffset = offset + 100
+		last := out.Conversations[99]
+		out.NextCursor = last.UpdatedAt.Format(time.RFC3339Nano) + "," + last.ID
 	}
 	// The app badge covers the whole inbox, not just its currently loaded page.
 	err = tx.QueryRow(ctx, `select count(*) from messages m
@@ -181,6 +252,19 @@ func (s *Service) Open(ctx context.Context, user, peer, origin string, input Sen
 		id, err = chatlog.EnsureMatch(ctx, tx, a, b)
 		if err != nil {
 			return "", err
+		}
+		// A match needs no introduction to be accepted, so a body is optional
+		// here — but one that was sent has to be delivered. Accepting it,
+		// answering 200 and dropping it is the worst of both, because the
+		// caller is told their message went somewhere.
+		if input.ClientMessageID != "" || strings.TrimSpace(input.Body) != "" {
+			c, e := s.access(ctx, tx, user, id, true)
+			if e != nil {
+				return "", e
+			}
+			if _, err = s.insert(ctx, tx, c, user, input); err != nil {
+				return "", err
+			}
 		}
 	} else {
 		// Existing requests are stable across retries; declined requests cannot be spammed.
@@ -371,7 +455,11 @@ func (s *Service) Receipt(ctx context.Context, user, id string, seq int64, read 
 	if err != nil {
 		return err
 	}
-	if c.State != "open" {
+	// A pending thread is readable — the recipient has the introduction on
+	// screen while deciding — and its unread message counts towards the inbox
+	// badge. Silently discarding the receipt while answering 204 left that
+	// badge stuck on someone who had plainly read the message.
+	if c.State != "open" && c.State != "pending" {
 		return nil
 	}
 	if seq < 0 || seq > c.Last {
@@ -465,6 +553,19 @@ func (s *Service) Events(ctx context.Context, user string, after int64) (EventPa
 	}
 	if after > current {
 		return out, httpx.BadRequest("Event cursor is ahead of this account.")
+	}
+	// A cursor older than what is still kept cannot be caught up from. Pruning
+	// removes the events between here and now, so replaying from this point
+	// would silently skip them; the honest answer is to start again from a
+	// fresh snapshot rather than to hand back a partial history.
+	var oldest *int64
+	if err := s.pool.QueryRow(ctx,
+		`select min(seq) from user_events where user_id=$1`, user).Scan(&oldest); err != nil {
+		return out, err
+	}
+	stale := (oldest == nil && after < current) || (oldest != nil && after+1 < *oldest)
+	if stale {
+		return out, httpx.Gone("This device is too far behind. Reload to catch up.")
 	}
 	rows, err := s.pool.Query(ctx, `select seq,conversation_id::text,kind from user_events where user_id=$1 and seq>$2 order by seq limit 101`, user, after)
 	if err != nil {

@@ -34,16 +34,13 @@ func validID(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 func (s *Service) handleBootstrap(w http.ResponseWriter, r *http.Request) {
-	offset := 0
-	if raw := r.URL.Query().Get("offset"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 0 || n > 10000 {
-			httpx.Error(w, r, httpx.BadRequest("Invalid inbox offset."))
-			return
-		}
-		offset = n
+	// Opaque to the caller: it is only ever echoed back from a previous page.
+	cursor := r.URL.Query().Get("cursor")
+	if len(cursor) > 100 {
+		httpx.Error(w, r, httpx.BadRequest("Invalid inbox cursor."))
+		return
 	}
-	out, err := s.Bootstrap(r.Context(), user(r), offset)
+	out, err := s.Bootstrap(r.Context(), user(r), cursor)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

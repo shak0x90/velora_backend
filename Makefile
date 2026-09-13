@@ -22,8 +22,12 @@ work:
 migrate:
 	@set -a && . ./.env && set +a && go run ./cmd/velora migrate
 
+# -p 1 runs one package at a time. The chat and chatpush integration tests
+# share a single CHAT_TEST_DATABASE_URL and truncate as they go, so letting Go
+# run those two packages concurrently makes them fail each other at random —
+# which reads as a flaky feature rather than a test harness overlapping itself.
 test:
-	go test ./...
+	go test -p 1 ./...
 
 # Against a live server, so it needs one running. VELORA_API_URL overrides the
 # default of http://127.0.0.1:8080 — on the box, that default is what you want.
@@ -31,7 +35,7 @@ apitest:
 	go run ./cmd/apitest suite $(SUITE)
 
 cover:
-	go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1
+	go test -p 1 -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1
 
 lint:
 	go vet ./...

@@ -66,5 +66,10 @@ type Snapshot struct {
 	Conversations []Conversation `json:"conversations"`
 	Cursor        int64          `json:"cursor,string"`
 	UnreadCount   int            `json:"unreadCount"`
-	NextOffset    int            `json:"nextOffset,omitempty"`
+	// NextCursor pages the inbox by position rather than by offset. The inbox
+	// is ordered by last activity, so a message arriving between two requests
+	// shifts every row below it: with an offset, the conversation pushed
+	// across the boundary is never sent at all. Keyed on the last row instead,
+	// the next page resumes exactly where this one stopped.
+	NextCursor string `json:"nextCursor,omitempty"`
 }

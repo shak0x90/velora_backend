@@ -157,7 +157,7 @@ func TestConcurrentRetryAndReceipts(t *testing.T) {
 	if _, err := f.s.History(f.ctx, f.third, f.cid, -1, 0, 50); err == nil {
 		t.Fatal("nonmember read")
 	}
-	snap, err := f.s.Bootstrap(f.ctx, f.b, 0)
+	snap, err := f.s.Bootstrap(f.ctx, f.b, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestConcurrentRetryAndReceipts(t *testing.T) {
 	if err = f.s.Receipt(f.ctx, f.b, f.cid, 1, false); err != nil {
 		t.Fatal(err)
 	}
-	snap, err = f.s.Bootstrap(f.ctx, f.a, 0)
+	snap, err = f.s.Bootstrap(f.ctx, f.a, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestConcurrentRetryAndReceipts(t *testing.T) {
 	if err = f.s.Receipt(f.ctx, f.b, f.cid, 0, true); err != nil {
 		t.Fatal(err)
 	}
-	snap, err = f.s.Bootstrap(f.ctx, f.b, 0)
+	snap, err = f.s.Bootstrap(f.ctx, f.b, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestConcurrentRetryAndReceipts(t *testing.T) {
 		t.Fatal(snap)
 	}
 	mustSend(t, f, f.b, f.cid, input("my own outgoing"))
-	snap, err = f.s.Bootstrap(f.ctx, f.b, 0)
+	snap, err = f.s.Bootstrap(f.ctx, f.b, "")
 	if err != nil || snap.Conversations[0].UnreadCount != 0 {
 		t.Fatal(snap, err)
 	}
@@ -274,7 +274,7 @@ func TestRequestsRepliesAndReveal(t *testing.T) {
 	}
 	mustSend(t, f, f.a, anon, input("Anonymous hello"))
 	for _, u := range []string{f.a, f.third} {
-		snap, e := f.s.Bootstrap(f.ctx, u, 0)
+		snap, e := f.s.Bootstrap(f.ctx, u, "")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -313,7 +313,7 @@ func TestBlockAndUnmatchCloseChat(t *testing.T) {
 		if _, err := f.s.History(f.ctx, uid, f.cid, -1, 0, 50); err == nil {
 			t.Fatal("blocked history")
 		}
-		snap, err := f.s.Bootstrap(f.ctx, uid, 0)
+		snap, err := f.s.Bootstrap(f.ctx, uid, "")
 		if err != nil || len(snap.Conversations) != 0 {
 			t.Fatal("blocked inbox", snap, err)
 		}
