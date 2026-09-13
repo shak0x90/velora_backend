@@ -276,25 +276,39 @@ const notBlocked = `
 		   or (user_id = profiles.user_id and blocked_id = $1)
 	)`
 
-// candidateWhere is who may still appear in a feed: everyone except yourself,
-// the hidden, the blocked, and anyone you have already decided about.
+// visibleWhere is everyone the viewer is allowed to see at all: not
+// themselves, not hidden, not blocked in either direction, not suspended, and
+// not browsing incognito unless they have already reached out.
 //
-// Those decisions are excluded in SQL rather than in Go because they are the
-// cheapest filter available — an index lookup per row, against sets that grow
-// with use — while every other filter needs the assembled profile anyway.
-const candidateWhere = `
+// These are permission rules. Nothing the viewer does can lift them, so every
+// surface that can put a person on screen starts from here.
+const visibleWhere = `
 	user_id <> $1
 	and hidden = false
+	and ` + incognitoVisible + `
+	and ` + activeAccount + `
+	and ` + notBlocked
+
+// candidateWhere narrows that to people the viewer has not decided about,
+// which is what a feed is for: passing on someone has to mean they stop coming
+// back around.
+//
+// Search deliberately does not use this. "Show me a new face" and "find this
+// person" are different questions, and answering the second with the first
+// means someone you liked yesterday cannot be found by name today — the app
+// reports that no such person exists, about someone it introduced you to.
+//
+// The decisions are excluded in SQL rather than in Go because they are the
+// cheapest filter available — an index lookup per row, against sets that grow
+// with use — while every other filter needs the assembled profile anyway.
+const candidateWhere = visibleWhere + `
 	and not exists (select 1 from passes where user_id = $1 and target_id = profiles.user_id)
 	and not exists (select 1 from likes  where from_user_id = $1 and to_user_id = profiles.user_id)
 	and not exists (
 		select 1 from matches
 		where user_a = least($1::uuid, profiles.user_id)
 		  and user_b = greatest($1::uuid, profiles.user_id)
-	)
-	and ` + incognitoVisible + `
-	and ` + activeAccount + `
-	and ` + notBlocked
+	)`
 
 // activeAccount keeps suspended and deleted people out of every read.
 //
@@ -335,15 +349,21 @@ func (s *Service) Candidates(ctx context.Context, viewer domain.Profile, limit i
 	return publicise(found, viewer.ID), nil
 }
 
-// Search narrows the candidate set by free text before ranking. The needle is
-// a bound parameter that SQL concatenates itself, so a value containing a
-// quote is data rather than syntax.
+// Search finds anyone the viewer is allowed to see, by free text, before
+// ranking. The needle is a bound parameter that SQL concatenates itself, so a
+// value containing a quote is data rather than syntax.
+//
+// It searches everyone visible rather than only feed candidates. Someone you
+// liked, passed or matched is still a person you may want to look up, and the
+// commonest reason to type a name is that you have met them already.
 func (s *Service) Search(ctx context.Context, viewer domain.Profile, query string, limit int) ([]domain.Profile, error) {
 	needle := strings.TrimSpace(query)
 	if needle == "" {
+		// An empty box is browsing, not looking for anyone in particular, so
+		// it shows the same set as the feed.
 		return s.Candidates(ctx, viewer, limit)
 	}
-	where := candidateWhere + `
+	where := visibleWhere + `
 		and (
 			first_name      ilike '%' || $2 || '%'
 			or occupation   ilike '%' || $2 || '%'
