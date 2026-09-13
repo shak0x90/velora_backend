@@ -69,9 +69,21 @@ func PassesFilters(p domain.Profile, f domain.DiscoverFilters, current domain.Pr
 			return false
 		}
 	}
-	// Fall back to the viewer's own stated preference only when no explicit
-	// gender filter is set — mirrors the Dart behavior exactly.
-	if !containsGender(current.Preferences.InterestedIn, p.Gender) && len(f.Genders) == 0 {
+	// Fall back to the viewer's own stated preference when no explicit gender
+	// filter is set — but only if they actually stated one.
+	//
+	// An empty list means "no preference", not "nobody". Read as a filter it
+	// matches no gender at all, so a viewer who never chose is shown an empty
+	// app: no feed, no daily picks, and a search that reports nobody by that
+	// name however hard they look. Onboarding never asks this question, so
+	// every account created on the web lands in exactly that state.
+	//
+	// This is a deliberate divergence from the Dart original, which has the
+	// same expression and the same hole. It never shows there because its mock
+	// profiles all arrive with preferences filled in. The Flutter app needs
+	// the same correction.
+	if len(f.Genders) == 0 && len(current.Preferences.InterestedIn) > 0 &&
+		!containsGender(current.Preferences.InterestedIn, p.Gender) {
 		return false
 	}
 	return true
