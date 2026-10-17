@@ -118,6 +118,7 @@ type Profile struct {
 	City               string              `json:"city"`
 	Neighborhood       string              `json:"neighborhood"`
 	DistanceKm         float64             `json:"distanceKm"`
+	DistanceKnown      bool                `json:"distanceKnown"`
 	Occupation         string              `json:"occupation"`
 	Education          string              `json:"education"`
 	Bio                string              `json:"bio"`

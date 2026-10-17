@@ -37,9 +37,9 @@ type Point struct{ Lat, Lng float64 }
 // distanceExpr measures kilometres from the viewer in SQL, so the database can
 // use the GiST index on ll_to_earth rather than shipping every row back.
 //
-// Unknown coordinates score 0 rather than null: an unplaced profile should
-// still be visible, and a distance filter it could never satisfy would hide it
-// permanently.
+// Unknown coordinates retain a numeric zero for backwards compatibility, but
+// distanceKnown travels beside it so clients never present that sentinel as a
+// real measurement.
 const distanceExpr = `
 	case
 		when $%d::float8 is null or lat is null or lng is null then 0
@@ -60,8 +60,10 @@ func (s *Service) query(
 	latArg, lngArg := len(args)-1, len(args)
 
 	statement := fmt.Sprintf(
-		`select %s, %s as distance_km from profiles where %s order by last_active_at desc`,
-		profileColumns, fmt.Sprintf(distanceExpr, latArg, latArg, lngArg), where,
+		`select %s, %s as distance_km,
+			($%d::float8 is not null and $%d::float8 is not null and lat is not null and lng is not null) as distance_known
+		 from profiles where %s order by last_active_at desc`,
+		profileColumns, fmt.Sprintf(distanceExpr, latArg, latArg, lngArg), latArg, lngArg, where,
 	)
 	if limit > 0 {
 		statement += fmt.Sprintf(" limit %d", limit)
@@ -103,7 +105,7 @@ func scanProfile(row pgx.Row) (domain.Profile, error) {
 		&interestedIn, &p.Preferences.MinAge, &p.Preferences.MaxAge,
 		&p.Preferences.MaxDistanceKm, &intents,
 		&p.PhotoVerified, &p.PhoneVerified, &p.Hidden, &p.Incognito, &lastActive,
-		&p.DistanceKm,
+		&p.DistanceKm, &p.DistanceKnown,
 	)
 	if err != nil {
 		return domain.Profile{}, err
@@ -249,8 +251,7 @@ func (s *Service) LoadOne(ctx context.Context, viewer domain.Profile, id string)
 		return s.Load(ctx, id)
 	}
 	found, err := s.query(ctx,
-		"user_id = $1 and hidden = false and "+activeAccount+" and "+
-			strings.Replace(notBlocked, "$1", "$2", -1),
+		"user_id = $1 and "+strings.ReplaceAll(visibleWhere, "$1", "$2"),
 		[]any{id, viewer.ID}, s.pointFor(ctx, viewer.ID), 1)
 	if err != nil {
 		return domain.Profile{}, err
@@ -328,13 +329,19 @@ const activeAccount = `
 // The interface says: browse without your visit being obvious, and you still
 // appear to people you like. So an incognito profile drops out of the feed and
 // out of search — but not for anyone it has already reached out to, because
-// hiding from someone you liked would make the like unanswerable.
+// hiding from someone you liked would make the like unanswerable. Matches
+// remain visible after the reciprocal likes are consumed by matching.
 const incognitoVisible = `
 	(
 		incognito = false
 		or exists (
 			select 1 from likes
 			where from_user_id = profiles.user_id and to_user_id = $1
+		)
+		or exists (
+			select 1 from matches
+			where user_a = least($1::uuid, profiles.user_id)
+			  and user_b = greatest($1::uuid, profiles.user_id)
 		)
 	)`
 
@@ -393,9 +400,8 @@ func (s *Service) LoadMany(ctx context.Context, viewer domain.Profile, ids []str
 		return []domain.Profile{}, nil
 	}
 	found, err := s.query(ctx,
-		"user_id = any($1) and (hidden = false or user_id = $2) and "+
-			"(user_id = $2 or "+activeAccount+") and "+
-			strings.Replace(notBlocked, "$1", "$2", -1),
+		"user_id = any($1) and (user_id = $2 or ("+
+			strings.ReplaceAll(visibleWhere, "$1", "$2")+"))",
 		[]any{ids, viewer.ID}, s.pointFor(ctx, viewer.ID), 0)
 	if err != nil {
 		return nil, err

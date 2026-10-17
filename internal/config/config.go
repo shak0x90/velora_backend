@@ -25,6 +25,7 @@ type Config struct {
 	// inside the client apps. Rejecting anything else is what stops a token
 	// minted for a different app from working here.
 	GoogleClientIDs []string
+	GoogleOnly      bool
 	// Photo storage. Local disk for now, served by nginx; this becomes an R2
 	// bucket behind Cloudflare once a domain exists, which is a swap of the
 	// media.Store implementation and these two values.
@@ -59,6 +60,7 @@ func Load() (Config, error) {
 		AllowedOrigins:  getList("ALLOWED_ORIGINS", []string{"http://localhost:3000"}),
 		LogLevel:        getString("LOG_LEVEL", "info"),
 		GoogleClientIDs: getList("GOOGLE_CLIENT_IDS", nil),
+		GoogleOnly:      getBool("GOOGLE_ONLY_AUTH", true),
 		MediaRoot:       getString("MEDIA_ROOT", "/var/www/velora-media"),
 		MediaBaseURL:    getString("MEDIA_BASE_URL", "http://localhost:8080/media"),
 		VAPIDPublicKey:  os.Getenv("VAPID_PUBLIC_KEY"),

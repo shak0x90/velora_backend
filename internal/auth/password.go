@@ -117,7 +117,7 @@ func (s *Service) Register(ctx context.Context, rawEmail, rawPassword string) (S
 		return Session{}, err
 	}
 
-	session, err := s.issue(ctx, tx, userID, uuid.New())
+	session, err := s.issue(ctx, tx, userID, uuid.New(), "email")
 	if err != nil {
 		return Session{}, err
 	}
@@ -174,7 +174,7 @@ func (s *Service) Login(ctx context.Context, rawEmail, rawPassword string) (Sess
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	session, err := s.issue(ctx, tx, userID, uuid.New())
+	session, err := s.issue(ctx, tx, userID, uuid.New(), "email")
 	if err != nil {
 		return Session{}, err
 	}

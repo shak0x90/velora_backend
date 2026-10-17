@@ -291,3 +291,29 @@ verification. Google sign-in and the planned R2/CDN setup remain separate work.
 
 Daily picks remain computed per request, and incoming likes retain the existing
 premium-gate behavior.
+
+Incognito visibility regression: set `PROFILE_TEST_DATABASE_URL` to an isolated
+PostgreSQL database whose name ends in `_privacy_test`, then run
+`go test ./internal/profile -run TestIncognitoVisibility -v`. The test migrates
+that database and removes its synthetic accounts afterward. It checks direct,
+batch, discovery and search reads, likes, matches, blocks, hidden profiles and
+suspension. No production database should be used.
+
+## Google-only web launch
+
+`GOOGLE_ONLY_AUTH` defaults to true. Set `GOOGLE_CLIENT_IDS` to the approved web
+OAuth client ID (and additional server audiences when mobile is configured).
+The web client sends a Google ID token to `POST /auth/social`; the server verifies
+signature, issuer, expiry, audience and verified email. No client secret is needed.
+Public password endpoints are not registered in Google-only mode. Migration 8
+records the authentication method on refresh tokens; legacy access and refresh
+sessions are refused in this mode. Do not roll this mode back on the public server.
+
+An existing email-only account can be linked when Google is authoritative for
+its email (Gmail or a verified Workspace domain). This preserves the user/profile
+ID, clears its password and revokes old sessions. Conflicting Google subjects
+or non-authoritative email matches return 409 for manual account recovery;
+they are never silently merged or duplicated.
+
+For database regression tests, set `AUTH_TEST_DATABASE_URL` to an isolated
+PostgreSQL database ending in `_auth_test`, then run `go test ./internal/auth -run Google -v`.

@@ -231,6 +231,9 @@ func CommunicationScore(a, b domain.Profile) int {
 // LocationScore is asymmetric on purpose: it is scored against the *viewer's*
 // max distance, so the same pair can read differently in each direction.
 func LocationScore(current, candidate domain.Profile) int {
+	if !candidate.DistanceKnown && candidate.DistanceKm == 0 {
+		return 50
+	}
 	max := float64(current.Preferences.MaxDistanceKm)
 	distance := candidate.DistanceKm
 	switch {
@@ -310,7 +313,7 @@ func buildInsights(current, candidate domain.Profile, shared []string, relations
 	if lifestyle >= 75 {
 		insights = append(insights, "Your day-to-day lifestyles line up")
 	}
-	if location >= 80 {
+	if (candidate.DistanceKnown || candidate.DistanceKm > 0) && location >= 80 {
 		insights = append(insights, fmt.Sprintf(
 			"%.0f km away — within your range", candidate.DistanceKm,
 		))

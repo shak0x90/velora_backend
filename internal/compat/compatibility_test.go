@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/shak0x90/velora_backend/internal/compat"
@@ -92,6 +93,20 @@ func TestEmptyProfilesScoreNeutrally(t *testing.T) {
 	}
 }
 
+func TestUnknownLocationDoesNotPretendToBeNearby(t *testing.T) {
+	a, b := sampleProfiles()
+	b.DistanceKm = 0
+	b.DistanceKnown = false
+	if got := compat.LocationScore(a, b); got != 50 {
+		t.Fatalf("unknown location score = %d, want neutral 50", got)
+	}
+	for _, insight := range compat.Calculate(a, b).Insights {
+		if strings.Contains(insight, "km away") {
+			t.Fatalf("unknown location produced distance insight %q", insight)
+		}
+	}
+}
+
 func sampleProfiles() (domain.Profile, domain.Profile) {
 	a := domain.Profile{
 		ID:                 "user_alex",
@@ -119,6 +134,7 @@ func sampleProfiles() (domain.Profile, domain.Profile) {
 		FirstName:          "Maya",
 		Age:                28,
 		DistanceKm:         4.2,
+		DistanceKnown:      true,
 		Gender:             domain.GenderWoman,
 		Interests:          []string{"Travel", "Art", "Coffee"},
 		RelationshipIntent: domain.IntentLongTerm,

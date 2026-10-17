@@ -140,14 +140,16 @@ func rankScore(current, candidate domain.Profile, overall, shared int) float64 {
 	}
 	score += float64(shared) * 1.4
 
-	proximity := 100 - candidate.DistanceKm*1.2
-	if proximity < 0 {
-		proximity = 0
+	if candidate.DistanceKnown || candidate.DistanceKm > 0 {
+		proximity := 100 - candidate.DistanceKm*1.2
+		if proximity < 0 {
+			proximity = 0
+		}
+		if proximity > 12 {
+			proximity = 12
+		}
+		score += proximity
 	}
-	if proximity > 12 {
-		proximity = 12
-	}
-	score += proximity
 
 	if candidate.PhotoVerified {
 		score += 4

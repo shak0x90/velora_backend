@@ -50,6 +50,7 @@ type Patch struct {
 	ID            *string  `json:"id"`
 	Age           *int     `json:"age"`
 	DistanceKm    *float64 `json:"distanceKm"`
+	DistanceKnown *bool    `json:"distanceKnown"`
 	PhotoVerified *bool    `json:"photoVerified"`
 	PhoneVerified *bool    `json:"phoneVerified"`
 	OnlineStatus  *string  `json:"onlineStatus"`

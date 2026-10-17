@@ -24,10 +24,11 @@ func UserIDFrom(ctx context.Context) string {
 
 // Routes registers the auth endpoints on the given mux.
 func (s *Service) Routes(mux *http.ServeMux) {
-	// Email + password. Here so accounts can be created before the Google
-	// OAuth clients exist, since those need a real domain.
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	// Explicit development compatibility only; public deployments use Google.
+	if !s.cfg.GoogleOnly {
+		mux.HandleFunc("POST /auth/register", s.handleRegister)
+		mux.HandleFunc("POST /auth/login", s.handleLogin)
+	}
 
 	mux.HandleFunc("POST /auth/social", s.handleSocial)
 	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
@@ -148,6 +149,8 @@ func (s *Service) RequireAuth(next http.Handler) http.Handler {
 // falls through to a generic 500 rather than leaking internals.
 func translate(err error) error {
 	switch {
+	case errors.Is(err, ErrAccountLinkRequired):
+		return httpx.Problem{Status: http.StatusConflict, Title: "Account linking required", Detail: "This Google account cannot be linked automatically. Contact support to recover your existing account."}
 	case errors.Is(err, ErrInvalidToken):
 		return httpx.Unauthorized("That sign-in could not be verified. Try again.")
 	case errors.Is(err, ErrTokenReuse):

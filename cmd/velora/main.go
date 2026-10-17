@@ -1,7 +1,7 @@
 // Command velora is the whole service: one binary, three modes.
 //
 //	velora serve     HTTP + WebSocket API
-//	velora work      background jobs (photos, daily picks, push)
+//	velora work      background jobs (chat web-push delivery)
 //	velora migrate   apply database migrations, then exit
 //
 // Running the API and the worker from the same binary keeps them on one
@@ -123,6 +123,7 @@ func serve(cfg config.Config) error {
 		AccessTokenTTL:  cfg.AccessTokenTTL,
 		RefreshTokenTTL: cfg.RefreshTokenTTL,
 		GoogleClientIDs: cfg.GoogleClientIDs,
+		GoogleOnly:      cfg.GoogleOnly,
 	})
 	if len(cfg.GoogleClientIDs) == 0 {
 		// Not fatal: the service still serves health and can be deployed

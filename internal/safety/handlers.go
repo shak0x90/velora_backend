@@ -36,7 +36,7 @@ func (s *Service) handleBlock(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.Block(r.Context(), auth.UserIDFrom(r.Context()),
 		r.PathValue("id"), req.Reason); err != nil {
-		httpx.Error(w, r, translateHTTP(err))
+		httpx.Error(w, r, TranslateHTTP(err))
 		return
 	}
 	httpx.JSON(w, http.StatusNoContent, nil)
@@ -45,7 +45,7 @@ func (s *Service) handleBlock(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleUnblock(w http.ResponseWriter, r *http.Request) {
 	if err := s.Unblock(r.Context(), auth.UserIDFrom(r.Context()),
 		r.PathValue("id")); err != nil {
-		httpx.Error(w, r, translateHTTP(err))
+		httpx.Error(w, r, TranslateHTTP(err))
 		return
 	}
 	httpx.JSON(w, http.StatusNoContent, nil)
@@ -72,7 +72,7 @@ func (s *Service) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.Report(r.Context(), auth.UserIDFrom(r.Context()), input); err != nil {
-		httpx.Error(w, r, translateHTTP(err))
+		httpx.Error(w, r, TranslateHTTP(err))
 		return
 	}
 	httpx.JSON(w, http.StatusNoContent, nil)
@@ -81,7 +81,7 @@ func (s *Service) handleReport(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleUnmatch(w http.ResponseWriter, r *http.Request) {
 	if err := s.Unmatch(r.Context(), auth.UserIDFrom(r.Context()),
 		r.PathValue("id")); err != nil {
-		httpx.Error(w, r, translateHTTP(err))
+		httpx.Error(w, r, TranslateHTTP(err))
 		return
 	}
 	httpx.JSON(w, http.StatusNoContent, nil)
@@ -91,7 +91,7 @@ func (s *Service) handleQueue(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	reports, err := s.Queue(r.Context(), r.URL.Query().Get("status"), limit)
 	if err != nil {
-		httpx.Error(w, r, translateHTTP(err))
+		httpx.Error(w, r, TranslateHTTP(err))
 		return
 	}
 	httpx.JSON(w, http.StatusOK, reports)
@@ -106,15 +106,17 @@ func (s *Service) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.Resolve(r.Context(), auth.UserIDFrom(r.Context()),
 		r.PathValue("id"), decision); err != nil {
-		httpx.Error(w, r, translateHTTP(err))
+		httpx.Error(w, r, TranslateHTTP(err))
 		return
 	}
 	httpx.JSON(w, http.StatusNoContent, nil)
 }
 
-// translateHTTP maps this package's errors onto problem documents. Anything
+// TranslateHTTP maps this package's errors onto problem documents. Anything
 // unrecognised falls through to a generic 500 rather than leaking internals.
-func translateHTTP(err error) error {
+// It is exported for other packages that call Block or Report on a user's
+// behalf, such as chat's in-conversation safety actions.
+func TranslateHTTP(err error) error {
 	switch {
 	case errors.Is(err, ErrSelfDirected):
 		return httpx.BadRequest("That is your own account.")

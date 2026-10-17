@@ -25,9 +25,10 @@ import (
 )
 
 var (
-	ErrInvalidToken     = errors.New("invalid or expired token")
-	ErrEmailNotVerified = errors.New("google account has no verified email")
-	ErrUserSuspended    = errors.New("account is suspended")
+	ErrInvalidToken        = errors.New("invalid or expired token")
+	ErrEmailNotVerified    = errors.New("google account has no verified email")
+	ErrUserSuspended       = errors.New("account is suspended")
+	ErrAccountLinkRequired = errors.New("account requires verified linking")
 	// ErrTokenReuse means a refresh token that was already spent came back.
 	// The realistic cause is theft, so the whole family is revoked.
 	ErrTokenReuse = errors.New("refresh token reuse detected")
@@ -59,6 +60,7 @@ type Config struct {
 	// web, Android, and iOS. A token minted for someone else's app must not be
 	// usable here, which is exactly what checking this prevents.
 	GoogleClientIDs []string
+	GoogleOnly      bool
 }
 
 type Service struct {
@@ -75,9 +77,10 @@ func New(pool *pgxpool.Pool, cfg Config) *Service {
 // ---------------------------------------------------------------------------
 
 type googleIdentity struct {
-	Subject string
-	Email   string
-	Name    string
+	Subject            string
+	Email              string
+	Name               string
+	AuthoritativeEmail bool
 }
 
 // verifyGoogle validates the signature against Google's published keys, then
@@ -94,6 +97,10 @@ func (s *Service) verifyGoogle(ctx context.Context, rawToken string) (googleIden
 		return googleIdentity{}, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
 
+	return s.identityFromGooglePayload(payload)
+}
+
+func (s *Service) identityFromGooglePayload(payload *idtoken.Payload) (googleIdentity, error) {
 	audienceOK := false
 	for _, allowed := range s.cfg.GoogleClientIDs {
 		if payload.Audience == allowed {
@@ -120,14 +127,16 @@ func (s *Service) verifyGoogle(ctx context.Context, rawToken string) (googleIden
 	if name == "" {
 		name, _ = payload.Claims["name"].(string)
 	}
-	if email == "" {
+	if email == "" || payload.Subject == "" {
 		return googleIdentity{}, fmt.Errorf("%w: no email claim", ErrInvalidToken)
 	}
 
+	hd, _ := payload.Claims["hd"].(string)
 	return googleIdentity{
-		Subject: payload.Subject,
-		Email:   strings.ToLower(email),
-		Name:    name,
+		AuthoritativeEmail: strings.HasSuffix(strings.ToLower(email), "@gmail.com") || hd != "",
+		Subject:            payload.Subject,
+		Email:              strings.ToLower(email),
+		Name:               name,
 	}, nil
 }
 
@@ -138,11 +147,23 @@ func (s *Service) SignInWithGoogle(ctx context.Context, rawToken string) (Sessio
 		return Session{}, err
 	}
 
+	return s.signInGoogleIdentity(ctx, identity)
+}
+
+// Called only after signature, issuer, audience and email verification.
+func (s *Service) signInGoogleIdentity(ctx context.Context, identity googleIdentity) (Session, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Session{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize both repeated Google sign-ins and competing email claims.
+	for _, key := range []string{"google:" + identity.Subject, "email:" + identity.Email} {
+		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, key); err != nil {
+			return Session{}, err
+		}
+	}
 
 	var userID uuid.UUID
 	var status string
@@ -160,27 +181,50 @@ func (s *Service) SignInWithGoogle(ctx context.Context, rawToken string) (Sessio
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		isNew = true
-		userID = uuid.New()
-		status = "active"
-		if _, err := tx.Exec(ctx,
-			`insert into users (id, status) values ($1, 'active')`, userID); err != nil {
-			return Session{}, fmt.Errorf("create user: %w", err)
+		// Only Google-authoritative email ownership can migrate a legacy account.
+		// Never merge two different Google subjects on the strength of an email.
+		var hasGoogle bool
+		err = tx.QueryRow(ctx, `select u.id,u.status,u.is_premium,
+			exists(select 1 from auth_identities g where g.user_id=u.id and g.method='google')
+			from auth_identities ai join users u on u.id=ai.user_id
+			where ai.method='email' and ai.identifier=$1 for update of u`, identity.Email).
+			Scan(&userID, &status, &isPremium, &hasGoogle)
+		if errors.Is(err, pgx.ErrNoRows) {
+			isNew = true
+			userID = uuid.New()
+			status = "active"
+			if _, err := tx.Exec(ctx, `insert into users(id,status) values($1,'active')`, userID); err != nil {
+				return Session{}, err
+			}
+		} else if err != nil {
+			return Session{}, err
+		} else {
+			if status != "active" {
+				return Session{}, ErrUserSuspended
+			}
+			if !s.cfg.GoogleOnly || !identity.AuthoritativeEmail || hasGoogle {
+				return Session{}, ErrAccountLinkRequired
+			}
+			// Legacy access tokens are rejected in Google-only mode. Revoke their
+			// refresh tokens and remove socket tickets as well before linking.
+			if _, err := tx.Exec(ctx, `update refresh_tokens set revoked_at=now() where user_id=$1 and revoked_at is null`, userID); err != nil {
+				return Session{}, err
+			}
+			if _, err := tx.Exec(ctx, `delete from chat_tickets where user_id=$1`, userID); err != nil {
+				return Session{}, err
+			}
+			if _, err := tx.Exec(ctx, `select pg_notify('velora_chat','logout:' || $1::text)`, userID.String()); err != nil {
+				return Session{}, err
+			}
 		}
-		if _, err := tx.Exec(ctx, `
-			insert into auth_identities (user_id, method, identifier, verified_at)
-			values ($1, 'google', $2, now())
-		`, userID, identity.Subject); err != nil {
-			return Session{}, fmt.Errorf("create identity: %w", err)
+		if _, err := tx.Exec(ctx, `insert into auth_identities(user_id,method,identifier,verified_at)
+			values($1,'google',$2,now())`, userID, identity.Subject); err != nil {
+			return Session{}, err
 		}
-		// Record the email as its own identity so a future email sign-in path
-		// resolves to the same user instead of creating a duplicate.
-		if _, err := tx.Exec(ctx, `
-			insert into auth_identities (user_id, method, identifier, verified_at)
-			values ($1, 'email', $2, now())
-			on conflict (method, identifier) do nothing
-		`, userID, identity.Email); err != nil {
-			return Session{}, fmt.Errorf("record email identity: %w", err)
+		if _, err := tx.Exec(ctx, `insert into auth_identities(user_id,method,identifier,verified_at)
+			values($1,'email',$2,now()) on conflict(method,identifier) do update
+			set verified_at=now(),password_hash=null,password_set_at=null`, userID, identity.Email); err != nil {
+			return Session{}, err
 		}
 	case err != nil:
 		return Session{}, fmt.Errorf("lookup identity: %w", err)
@@ -190,7 +234,7 @@ func (s *Service) SignInWithGoogle(ctx context.Context, rawToken string) (Sessio
 		return Session{}, ErrUserSuspended
 	}
 
-	session, err := s.issue(ctx, tx, userID, uuid.New())
+	session, err := s.issue(ctx, tx, userID, uuid.New(), "google")
 	if err != nil {
 		return Session{}, err
 	}
@@ -213,12 +257,13 @@ func (s *Service) SignInWithGoogle(ctx context.Context, rawToken string) (Sessio
 // Tokens
 // ---------------------------------------------------------------------------
 
-func (s *Service) issue(ctx context.Context, tx pgx.Tx, userID, familyID uuid.UUID) (Session, error) {
+func (s *Service) issue(ctx context.Context, tx pgx.Tx, userID, familyID uuid.UUID, method string) (Session, error) {
 	now := time.Now().UTC()
 	accessExp := now.Add(s.cfg.AccessTokenTTL)
 
 	claims := jwt.MapClaims{
 		"sub": userID.String(),
+		"amr": method,
 		"iat": now.Unix(),
 		"exp": accessExp.Unix(),
 	}
@@ -235,9 +280,9 @@ func (s *Service) issue(ctx context.Context, tx pgx.Tx, userID, familyID uuid.UU
 	sum := sha256.Sum256([]byte(refresh))
 
 	if _, err := tx.Exec(ctx, `
-		insert into refresh_tokens (id, user_id, family_id, token_hash, expires_at)
-		values ($1, $2, $3, $4, $5)
-	`, uuid.New(), userID, familyID, sum[:], now.Add(s.cfg.RefreshTokenTTL)); err != nil {
+		insert into refresh_tokens (id, user_id, family_id, token_hash, expires_at, auth_method)
+		values ($1, $2, $3, $4, $5, $6)
+	`, uuid.New(), userID, familyID, sum[:], now.Add(s.cfg.RefreshTokenTTL), method); err != nil {
 		return Session{}, fmt.Errorf("store refresh token: %w", err)
 	}
 
@@ -261,6 +306,7 @@ func (s *Service) Refresh(ctx context.Context, presented string) (Session, error
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var id, userID, familyID uuid.UUID
+	var authMethod string
 	var expiresAt time.Time
 	var usedAt, revokedAt *time.Time
 
@@ -271,15 +317,26 @@ func (s *Service) Refresh(ctx context.Context, presented string) (Session, error
 	// then takes the reuse path below, which is the honest outcome — we cannot
 	// tell a racing client from a stolen token.
 	err = tx.QueryRow(ctx, `
-		select id, user_id, family_id, expires_at, used_at, revoked_at
+		select id, user_id, family_id, expires_at, used_at, revoked_at, auth_method
 		from refresh_tokens where token_hash = $1
 		for update
-	`, sum[:]).Scan(&id, &userID, &familyID, &expiresAt, &usedAt, &revokedAt)
+	`, sum[:]).Scan(&id, &userID, &familyID, &expiresAt, &usedAt, &revokedAt, &authMethod)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrInvalidToken
 	}
 	if err != nil {
 		return Session{}, err
+	}
+
+	if s.cfg.GoogleOnly && authMethod != "google" {
+		return Session{}, ErrInvalidToken
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `select status='active' from users where id=$1`, userID).Scan(&active); err != nil {
+		return Session{}, err
+	}
+	if !active {
+		return Session{}, ErrUserSuspended
 	}
 
 	if usedAt != nil {
@@ -303,7 +360,7 @@ func (s *Service) Refresh(ctx context.Context, presented string) (Session, error
 		return Session{}, err
 	}
 
-	session, err := s.issue(ctx, tx, userID, familyID)
+	session, err := s.issue(ctx, tx, userID, familyID, authMethod)
 	if err != nil {
 		return Session{}, err
 	}
@@ -356,12 +413,15 @@ func (s *Service) SignOut(ctx context.Context, presented string) error {
 func (s *Service) ParseAccessToken(raw string) (string, error) {
 	token, err := jwt.Parse(raw, func(t *jwt.Token) (any, error) {
 		return s.cfg.SigningKey, nil
-	}, jwt.WithValidMethods([]string{"HS256"}))
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired())
 	if err != nil || !token.Valid {
 		return "", ErrInvalidToken
 	}
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
+		return "", ErrInvalidToken
+	}
+	if s.cfg.GoogleOnly && claims["amr"] != "google" {
 		return "", ErrInvalidToken
 	}
 	sub, _ := claims["sub"].(string)

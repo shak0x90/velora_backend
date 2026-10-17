@@ -408,7 +408,11 @@
           "neighborhood": { "type": "string" },
           "distanceKm": {
             "type": "number",
-            "description": "From the viewer. Zero when either side has no location."
+            "description": "Kilometres from the viewer. Read distanceKnown before presenting this value."
+          },
+          "distanceKnown": {
+            "type": "boolean",
+            "description": "True only when both profiles have coordinates and distanceKm is a real measurement."
           },
           "occupation": { "type": "string" },
           "education": { "type": "string" },

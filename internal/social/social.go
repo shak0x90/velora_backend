@@ -341,18 +341,32 @@ func (s *Service) RemoveLike(ctx context.Context, userID, likeID string) error {
 
 // Matches lists the viewer's matches, each told from their side.
 //
-// The message preview and unread count stay empty until the messaging phase.
-// They are real fields of the clients' MatchRecord, so they are present and
-// zero rather than absent, and the screens degrade to "matched, no chat yet"
-// instead of failing to render.
+// The message preview and unread count come from the pair's match
+// conversation, read from the viewer's participant row so "unread" means
+// unread by them. A match with no conversation or no messages keeps an empty
+// preview and zero unread, and the screens show "matched, no chat yet".
 func (s *Service) Matches(ctx context.Context, userID string) ([]domain.MatchRecord, error) {
 	rows, err := s.pool.Query(ctx, `
-		select id::text,
-		       case when user_a = $1 then user_b::text else user_a::text end as other_id,
-		       created_at
-		from matches
-		where user_a = $1 or user_b = $1
-		order by created_at desc
+		select mt.id::text,
+		       case when mt.user_a = $1 then mt.user_b::text else mt.user_a::text end as other_id,
+		       mt.created_at,
+		       coalesce((
+		           select case when m.deleted_at is null then m.body else 'Message deleted' end
+		           from messages m where m.conversation_id = c.id
+		           order by m.seq desc limit 1
+		       ), ''),
+		       coalesce((
+		           select count(*) from messages m
+		           where m.conversation_id = c.id and m.seq > me.last_read_seq
+		             and m.sender_id <> $1 and m.deleted_at is null
+		       ), 0)
+		from matches mt
+		left join conversations c
+		       on c.user_a = mt.user_a and c.user_b = mt.user_b and c.origin = 'match'
+		left join conversation_participants me
+		       on me.conversation_id = c.id and me.user_id = $1
+		where mt.user_a = $1 or mt.user_b = $1
+		order by mt.created_at desc
 	`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("load matches: %w", err)
@@ -362,7 +376,8 @@ func (s *Service) Matches(ctx context.Context, userID string) ([]domain.MatchRec
 	out := []domain.MatchRecord{}
 	for rows.Next() {
 		var m domain.MatchRecord
-		if err := rows.Scan(&m.ID, &m.ProfileID, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ProfileID, &m.CreatedAt,
+			&m.LastMessagePreview, &m.UnreadCount); err != nil {
 			return nil, err
 		}
 		m.IsNew = time.Since(m.CreatedAt) < newMatchWindow

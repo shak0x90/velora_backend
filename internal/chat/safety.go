@@ -70,7 +70,7 @@ func (s *Service) handleSafety(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httpx.Error(w, r, err)
+		httpx.Error(w, r, safety.TranslateHTTP(err))
 		return
 	}
 	httpx.JSON(w, 204, nil)
