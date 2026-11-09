@@ -77,12 +77,35 @@ func (s *Service) Create(ctx context.Context, userID string, patch Patch) (domai
 		return domain.Profile{}, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	// A username the client chose is kept exactly; otherwise one is made
+	// from the first name. Two people with the same name onboarding at the
+	// same instant can both be offered "shakil": the unique index refuses the
+	// second, and only that case is retried, with a fresh suggestion.
+	for attempt := 0; ; attempt++ {
+		err = s.createTx(ctx, userID, patch, birth)
+		if err == nil || patch.Username != nil || !errors.Is(err, ErrUsernameTaken) || attempt == 2 {
+			break
+		}
+	}
 	if err != nil {
 		return domain.Profile{}, err
 	}
+
+	if err := s.reconcilePhotos(ctx, userID, patch); err != nil {
+		return domain.Profile{}, err
+	}
+	return s.Load(ctx, userID)
+}
+
+func (s *Service) createTx(ctx context.Context, userID string, patch Patch, birth time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// The insert trigger assigns suggest_username(first_name); a restarted
+	// wizard keeps the username already assigned.
 	if _, err := tx.Exec(ctx, `
 		insert into profiles (user_id, first_name, birth_date, gender)
 		values ($1, $2, $3, $4)
@@ -92,20 +115,13 @@ func (s *Service) Create(ctx context.Context, userID string, patch Patch) (domai
 			gender     = excluded.gender,
 			updated_at = now()
 	`, userID, strings.TrimSpace(*patch.FirstName), birth, *patch.Gender); err != nil {
-		return domain.Profile{}, translateConstraint(err)
+		return translateConstraint(err)
 	}
 
 	if err := s.applyTx(ctx, tx, userID, patch); err != nil {
-		return domain.Profile{}, err
+		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.Profile{}, err
-	}
-
-	if err := s.reconcilePhotos(ctx, userID, patch); err != nil {
-		return domain.Profile{}, err
-	}
-	return s.Load(ctx, userID)
+	return tx.Commit(ctx)
 }
 
 // Update applies a partial change to an existing profile.
@@ -149,6 +165,9 @@ func (s *Service) applyTx(ctx context.Context, tx pgx.Tx, userID string, patch P
 
 	if patch.FirstName != nil {
 		set.add("first_name", strings.TrimSpace(*patch.FirstName))
+	}
+	if patch.Username != nil {
+		set.add("username", NormalizeUsername(*patch.Username))
 	}
 	if patch.DateOfBirth != nil {
 		birth, err := parseDate(*patch.DateOfBirth)
@@ -439,6 +458,9 @@ func translateConstraint(err error) error {
 	}
 	if strings.Contains(err.Error(), "profiles_adult_only") {
 		return ValidationError{Detail: "You need to be 18 or older to use Velora."}
+	}
+	if isUsernameConflict(err) {
+		return ErrUsernameTaken
 	}
 	return err
 }

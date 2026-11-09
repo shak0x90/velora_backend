@@ -43,6 +43,17 @@ type Config struct {
 	VAPIDPublicKey  string
 	VAPIDPrivateKey string
 	VAPIDSubject    string
+	// Native push. Every value is optional: with none set, devices still
+	// register and nothing is sent. FCM covers Android, and iOS too unless
+	// the APNs values are set (an app built with firebase_messaging hands
+	// out FCM tokens on iOS, so FCM alone is the usual setup).
+	FCMProjectID       string
+	FCMCredentialsFile string
+	APNsKeyFile        string
+	APNsKeyID          string
+	APNsTeamID         string
+	APNsTopic          string
+	APNsProduction     bool
 }
 
 func (c Config) IsProduction() bool { return c.Env == "production" }
@@ -66,6 +77,14 @@ func Load() (Config, error) {
 		VAPIDPublicKey:  os.Getenv("VAPID_PUBLIC_KEY"),
 		VAPIDPrivateKey: os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject:    os.Getenv("VAPID_SUBJECT"),
+
+		FCMProjectID:       os.Getenv("FCM_PROJECT_ID"),
+		FCMCredentialsFile: os.Getenv("FCM_CREDENTIALS_FILE"),
+		APNsKeyFile:        os.Getenv("APNS_KEY_FILE"),
+		APNsKeyID:          os.Getenv("APNS_KEY_ID"),
+		APNsTeamID:         os.Getenv("APNS_TEAM_ID"),
+		APNsTopic:          os.Getenv("APNS_TOPIC"),
+		APNsProduction:     getBool("APNS_PRODUCTION", false),
 	}
 	// Defaults to on outside production, so a fresh clone has the explorer
 	// without anyone reading the README to find it.

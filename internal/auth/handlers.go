@@ -22,6 +22,12 @@ func UserIDFrom(ctx context.Context) string {
 	return id
 }
 
+// WithUserID returns ctx carrying userID exactly as RequireAuth would leave
+// it. For tests of handlers that sit behind the guard, and nothing else.
+func WithUserID(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, userIDKey, userID)
+}
+
 // Routes registers the auth endpoints on the given mux.
 func (s *Service) Routes(mux *http.ServeMux) {
 	// Explicit development compatibility only; public deployments use Google.

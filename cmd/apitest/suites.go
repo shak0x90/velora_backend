@@ -28,6 +28,7 @@ var suites = []suite{
 	{"discovery", "feed, search, detail, suggestions", discoverySuite},
 	{"social", "likes, matches, notifications, races", socialSuite},
 	{"safety", "blocking, reporting, unmatching, moderation", safetySuite},
+	{"account", "self-service deletion", accountSuite},
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +587,45 @@ func safetySuite(r *runner) {
 	anon := r.client.do("GET", "/admin/reports", nil, "")
 	r.check("an unauthenticated caller gets nothing",
 		anon.status == 401 || anon.status == 404, anon.short())
+}
+
+// ---------------------------------------------------------------------------
+// Account deletion
+// ---------------------------------------------------------------------------
+
+func accountSuite(r *runner) {
+	leaving := r.must(r.client.onboarded("aca", "woman", []string{"man"},
+		map[string]any{"occupation": "Unmistakable Glassblower"}))
+	staying := r.must(r.client.onboarded("acb", "man", []string{"woman"}, nil))
+
+	_ = leaving.do("POST", "/likes", map[string]any{"profileId": staying.ID})
+	paired := staying.do("POST", "/likes", map[string]any{"profileId": leaving.ID})
+	r.check("they match first", paired.boolean("matched"), paired.short())
+
+	r.section("deleting")
+	anon := r.client.do("DELETE", "/me", nil, "")
+	r.check("an unauthenticated delete is 401", anon.status == 401, anon.short())
+	gone := leaving.do("DELETE", "/me", nil)
+	r.check("deleting is 204", gone.status == 204, gone.short())
+
+	// The access token is still unexpired; it must stop working anyway.
+	me := leaving.do("GET", "/me", nil)
+	r.check("the old token no longer reads /me", me.status == 403, me.short())
+	again := leaving.do("DELETE", "/me", nil)
+	r.check("deleting twice is refused", again.status == 403, again.short())
+	_, err := r.client.signIn(leaving.email, testPassword)
+	r.check("the old credentials no longer sign in", err != nil, err)
+
+	r.section("what the other person sees")
+	r.check("the match is gone",
+		len(staying.do("GET", "/matches", nil).list()) == 0, "")
+	r.check("the profile cannot be opened",
+		staying.do("GET", "/profiles/"+leaving.ID, nil).status == 404, "")
+	r.check("the profile is out of search",
+		!containsProfile(staying.do("GET", "/search?q=Glassblower", nil).list(), leaving.ID), "")
+	inbox := staying.do("GET", "/chat/bootstrap", nil)
+	r.check("the thread leaves the inbox",
+		inbox.ok() && !strings.Contains(inbox.raw, leaving.ID), inbox.short())
 }
 
 // ---------------------------------------------------------------------------

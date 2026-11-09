@@ -172,9 +172,24 @@ func rankScore(current, candidate domain.Profile, overall, shared int) float64 {
 // Recommend filters, scores, and ranks. Sorting is stable and falls back to ID
 // so equal scores keep a deterministic order across requests.
 func Recommend(current domain.Profile, candidates []domain.Profile, f domain.DiscoverFilters) []domain.RankedProfile {
+	passing := make([]domain.Profile, 0, len(candidates))
+	for _, candidate := range candidates {
+		if PassesFilters(candidate, f, current) {
+			passing = append(passing, candidate)
+		}
+	}
+	return Rank(current, passing)
+}
+
+// Rank scores and orders candidates without filtering any out. Searching for
+// someone by name or username uses it: that is a request for a particular
+// person, so the viewer's dating preferences (gender, age, distance) must not
+// make a friend look like they do not exist. Permission rules — hidden,
+// blocked, suspended — are applied in SQL before this and still hold.
+func Rank(current domain.Profile, candidates []domain.Profile) []domain.RankedProfile {
 	out := make([]domain.RankedProfile, 0, len(candidates))
 	for _, candidate := range candidates {
-		if !PassesFilters(candidate, f, current) {
+		if candidate.Hidden {
 			continue
 		}
 		result := Calculate(current, candidate)

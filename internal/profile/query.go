@@ -21,7 +21,7 @@ import (
 // profileColumns is shared by every read so the scan order can never drift
 // from the select list.
 const profileColumns = `
-	user_id::text, first_name, birth_date, gender, pronouns,
+	user_id::text, first_name, username, birth_date, gender, pronouns,
 	city, neighborhood, occupation, education, bio,
 	interests, relationship_intent, communication_style, personality_traits,
 	exercise, drinking, smoking, diet, sleep_schedule, pets, children,
@@ -96,7 +96,7 @@ func scanProfile(row pgx.Row) (domain.Profile, error) {
 	var lastActive, birth time.Time
 
 	err := row.Scan(
-		&p.ID, &p.FirstName, &birth, &p.Gender, &p.Pronouns,
+		&p.ID, &p.FirstName, &p.Username, &birth, &p.Gender, &p.Pronouns,
 		&p.City, &p.Neighborhood, &p.Occupation, &p.Education, &p.Bio,
 		&p.Interests, &p.RelationshipIntent, &p.CommunicationStyle, &p.PersonalityTraits,
 		&p.Lifestyle.Exercise, &p.Lifestyle.Drinking, &p.Lifestyle.Smoking,
@@ -372,7 +372,8 @@ func (s *Service) Search(ctx context.Context, viewer domain.Profile, query strin
 	}
 	where := visibleWhere + `
 		and (
-			first_name      ilike '%' || $2 || '%'
+			username        like lower(ltrim($2, '@')) || '%'
+			or first_name   ilike '%' || $2 || '%'
 			or occupation   ilike '%' || $2 || '%'
 			or education    ilike '%' || $2 || '%'
 			or neighborhood ilike '%' || $2 || '%'

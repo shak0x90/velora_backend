@@ -19,6 +19,19 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /me", s.guard(http.HandlerFunc(s.handleMe)))
 	mux.Handle("PATCH /me", s.guard(http.HandlerFunc(s.handleUpdate)))
 	mux.Handle("POST /me/onboarding", s.guard(http.HandlerFunc(s.handleOnboard)))
+	mux.Handle("GET /usernames/{username}/availability", s.guard(http.HandlerFunc(s.handleAvailability)))
+}
+
+// handleAvailability lets the username field say "taken" while someone types,
+// before they submit. The answer is advisory: PATCH /me can still lose a race,
+// and answers 409 if it does.
+func (s *Service) handleAvailability(w http.ResponseWriter, r *http.Request) {
+	answer, err := s.UsernameAvailable(r.Context(), auth.UserIDFrom(r.Context()), r.PathValue("username"))
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, answer)
 }
 
 // meResponse is what a client boots from. Profile and completion are null
@@ -118,6 +131,13 @@ func translate(err error) error {
 	switch {
 	case errors.As(err, &invalid):
 		return httpx.BadRequest(invalid.Detail)
+	case errors.Is(err, ErrUsernameTaken):
+		return httpx.Problem{
+			Type:   "about:blank#username-taken",
+			Title:  "Username taken",
+			Status: http.StatusConflict,
+			Detail: "That username is taken. Try another.",
+		}
 	case errors.Is(err, ErrNoProfile):
 		return httpx.Problem{
 			Type:   "about:blank#no-profile",

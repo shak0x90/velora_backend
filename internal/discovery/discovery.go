@@ -9,7 +9,10 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/shak0x90/velora_backend/internal/compat"
 	"github.com/shak0x90/velora_backend/internal/domain"
@@ -24,16 +27,35 @@ const candidatePool = 300
 // dailyPickCount matches the clients' daily picks strip.
 const dailyPickCount = 5
 
+// profileSource is the slice of the profile service discovery reads through.
+// An interface so the handlers can be tested without a database.
+type profileSource interface {
+	Load(ctx context.Context, userID string) (domain.Profile, error)
+	Candidates(ctx context.Context, viewer domain.Profile, limit int) ([]domain.Profile, error)
+	Search(ctx context.Context, viewer domain.Profile, query string, limit int) ([]domain.Profile, error)
+	LoadOne(ctx context.Context, viewer domain.Profile, id string) (domain.Profile, error)
+	LoadMany(ctx context.Context, viewer domain.Profile, ids []string) ([]domain.Profile, error)
+	LoadByUsername(ctx context.Context, viewer domain.Profile, username string) (domain.Profile, error)
+}
+
 type Service struct {
-	profiles *profile.Service
+	profiles profileSource
 	guard    func(http.Handler) http.Handler
+	daily    DailyStore
+	now      func() time.Time
 }
 
 // New wires the service. Profiles are read through the profile package rather
 // than queried here, so there stays exactly one definition of what a profile
 // is and how it is assembled.
 func New(profiles *profile.Service, guard func(http.Handler) http.Handler) *Service {
-	return &Service{profiles: profiles, guard: guard}
+	return &Service{profiles: profiles, guard: guard, now: time.Now}
+}
+
+// WithDailyEdits turns on GET /discover/daily-edit, backed by store.
+func (s *Service) WithDailyEdits(store DailyStore) *Service {
+	s.daily = store
+	return s
 }
 
 // Re-exported so handlers can tell the two apart without importing the profile
@@ -67,9 +89,8 @@ func (s *Service) Feed(ctx context.Context, userID string, filters domain.Discov
 
 // DailyPicks is the top of the default-filter feed.
 //
-// It is computed per request rather than frozen for the day. Freezing is a
-// scheduled job that needs somewhere to write, and until that table exists a
-// stale pick would be worse than a recomputed one.
+// It is computed per request rather than frozen for the day; the frozen,
+// per-day batch is DailyEdit. This stays for the clients already using it.
 func (s *Service) DailyPicks(ctx context.Context, userID string) ([]domain.RankedProfile, error) {
 	me, err := s.viewer(ctx, userID)
 	if err != nil {
@@ -82,9 +103,16 @@ func (s *Service) DailyPicks(ctx context.Context, userID string) ([]domain.Ranke
 	return compat.DailyPicks(me, candidates, dailyPickCount), nil
 }
 
-// Search ranks the text-matched subset. It deliberately ignores the saved
-// discover filters: someone typing a name is looking for that person, not for
-// whoever happens to survive their age range.
+// Search finds people by name, username, work, place or interest.
+//
+// Typed text is a request for particular people, so no dating preference
+// applies: a man looking for his friend Alex must find Alex whatever genders
+// he is set to see. An exact username ("shakil" or "@shakil") goes first,
+// fetched directly if it fell outside the text-match window. The visibility
+// rules (hidden, blocked, suspended, incognito) still hold throughout.
+//
+// An empty box is browsing, not looking for anyone, so it keeps the viewer's
+// gender preference like the feed does.
 func (s *Service) Search(ctx context.Context, userID, query string) ([]domain.RankedProfile, error) {
 	me, err := s.viewer(ctx, userID)
 	if err != nil {
@@ -94,7 +122,46 @@ func (s *Service) Search(ctx context.Context, userID, query string) ([]domain.Ra
 	if err != nil {
 		return nil, err
 	}
-	return compat.Recommend(me, matched, wideFilters(me)), nil
+	if strings.TrimSpace(query) == "" {
+		return compat.Recommend(me, matched, wideFilters(me)), nil
+	}
+	ranked := compat.Rank(me, matched)
+	if !profile.LooksLikeUsername(query) {
+		return ranked, nil
+	}
+	name := profile.NormalizeUsername(query)
+	for i, r := range ranked {
+		if r.Profile.Username == name {
+			exact := ranked[i]
+			copy(ranked[1:i+1], ranked[:i])
+			ranked[0] = exact
+			return ranked, nil
+		}
+	}
+	exact, err := s.profiles.LoadByUsername(ctx, me, name)
+	if errors.Is(err, ErrNotFound) || (err == nil && exact.ID == me.ID) {
+		return ranked, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return append([]domain.RankedProfile{{
+		Profile: exact, Compatibility: compat.Calculate(me, exact),
+	}}, ranked...), nil
+}
+
+// ByUsername is one person by exact username, with the same compatibility
+// read as Detail.
+func (s *Service) ByUsername(ctx context.Context, userID, username string) (domain.RankedProfile, error) {
+	me, err := s.viewer(ctx, userID)
+	if err != nil {
+		return domain.RankedProfile{}, err
+	}
+	other, err := s.profiles.LoadByUsername(ctx, me, username)
+	if err != nil {
+		return domain.RankedProfile{}, err
+	}
+	return domain.RankedProfile{Profile: other, Compatibility: compat.Calculate(me, other)}, nil
 }
 
 // Detail is one profile plus the compatibility read that explains it.

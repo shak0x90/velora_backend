@@ -23,6 +23,7 @@ func (e ValidationError) Error() string { return e.Detail }
 // httpx.Decode turns any undeclared field into a 400.
 type Patch struct {
 	FirstName          *string                     `json:"firstName"`
+	Username           *string                     `json:"username"`
 	DateOfBirth        *string                     `json:"dateOfBirth"`
 	Gender             *domain.Gender              `json:"gender"`
 	Pronouns           *string                     `json:"pronouns"`
@@ -127,6 +128,11 @@ func (p Patch) validate() error {
 			return ValidationError{
 				Detail: fmt.Sprintf("Keep your first name under %d characters.", maxFirstNameLen),
 			}
+		}
+	}
+	if p.Username != nil {
+		if err := ValidateUsername(NormalizeUsername(*p.Username)); err != nil {
+			return err
 		}
 	}
 	if p.Gender != nil && !validGenders[*p.Gender] {

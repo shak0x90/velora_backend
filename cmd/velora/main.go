@@ -1,7 +1,7 @@
 // Command velora is the whole service: one binary, three modes.
 //
 //	velora serve     HTTP + WebSocket API
-//	velora work      background jobs (chat web-push delivery)
+//	velora work      background jobs (browser and native push delivery)
 //	velora migrate   apply database migrations, then exit
 //
 // Running the API and the worker from the same binary keeps them on one
@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shak0x90/velora_backend/internal/account"
 	"github.com/shak0x90/velora_backend/internal/apidocs"
 	"github.com/shak0x90/velora_backend/internal/auth"
 	"github.com/shak0x90/velora_backend/internal/chat"
@@ -29,9 +30,13 @@ import (
 	"github.com/shak0x90/velora_backend/internal/discovery"
 	"github.com/shak0x90/velora_backend/internal/httpx"
 	"github.com/shak0x90/velora_backend/internal/media"
+	"github.com/shak0x90/velora_backend/internal/mobilepush"
 	"github.com/shak0x90/velora_backend/internal/profile"
 	"github.com/shak0x90/velora_backend/internal/safety"
+	"github.com/shak0x90/velora_backend/internal/settings"
 	"github.com/shak0x90/velora_backend/internal/social"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func main() {
@@ -153,10 +158,11 @@ func serve(cfg config.Config) error {
 
 	authService.Routes(mux)
 
-	mediaService := media.New(pool, media.LocalStore{
+	mediaStore := media.LocalStore{
 		Root:    cfg.MediaRoot,
 		BaseURL: cfg.MediaBaseURL,
-	}, authService.RequireAuth)
+	}
+	mediaService := media.New(pool, mediaStore, authService.RequireAuth)
 	mediaService.Routes(mux)
 
 	// After media: assembling a profile joins photo URLs onto the row, so it
@@ -166,15 +172,42 @@ func serve(cfg config.Config) error {
 
 	// Discovery reads profiles through the profile service rather than the
 	// pool, so there is one definition of how a row becomes a Profile.
-	discovery.New(profileService, authService.RequireAuth).Routes(mux)
-	social.New(pool, authService).Routes(mux)
+	discovery.New(profileService, authService.RequireAuth).
+		WithDailyEdits(discovery.NewDailyStore(pool)).
+		Routes(mux)
+
+	// Native push: the API only inserts jobs; `velora work` sends them.
+	pushRouter, err := mobilepush.NewRouter(ctx, mobilePushConfig(cfg))
+	if err != nil {
+		return err
+	}
+	if !pushRouter.Any() {
+		slog.Warn("FCM_CREDENTIALS_FILE and APNS_* are unset — devices register but no native push is sent")
+	}
+	mobileQueue, err := mobilepush.New(pool, pushRouter, false)
+	if err != nil {
+		return err
+	}
+	mobilepush.NewDevices(pool, authService).Routes(mux)
+	settings.New(pool, authService).Routes(mux)
+
+	social.New(pool, authService).WithPush(mobileQueue.SocialHook).Routes(mux)
 	safety.New(pool, authService).Routes(mux)
+	// DELETE /me. Needs the store directly: photo files go after the commit.
+	account.New(pool, mediaStore, authService).Routes(mux)
 	pushQueue, err := chatpush.New(pool, chatpush.Config{PublicKey: cfg.VAPIDPublicKey, PrivateKey: cfg.VAPIDPrivateKey, Subject: cfg.VAPIDSubject}, false)
 	if err != nil {
 		return err
 	}
 	pushQueue.Routes(mux, authService)
-	chatService := chat.New(pool, authService, cfg.AllowedOrigins, pushQueue.Enqueue)
+	// One hook, two channels: browser Web Push and native devices.
+	chatService := chat.New(pool, authService, cfg.AllowedOrigins,
+		func(ctx context.Context, tx pgx.Tx, messageID, recipientID string, seq int64) error {
+			if err := pushQueue.Enqueue(ctx, tx, messageID, recipientID, seq); err != nil {
+				return err
+			}
+			return mobileQueue.MessageHook(ctx, tx, messageID, recipientID, seq)
+		})
 	chatService.Routes(mux)
 	chatCtx, cancelChat := context.WithCancel(ctx)
 	defer cancelChat()
@@ -256,9 +289,25 @@ func work(cfg config.Config) error {
 	if err = queue.Start(ctx); err != nil {
 		return err
 	}
+	// Native push runs its own River client on its own queue, so neither
+	// client fetches a job kind it has no worker for.
+	router, err := mobilepush.NewRouter(ctx, mobilePushConfig(cfg))
+	if err != nil {
+		return err
+	}
+	mobile, err := mobilepush.New(pool, router, true)
+	if err != nil {
+		return err
+	}
+	if err = mobile.Start(ctx); err != nil {
+		return err
+	}
 	<-ctx.Done()
 	shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if err = mobile.Stop(shutdown); err != nil {
+		return err
+	}
 	if err = queue.Stop(shutdown); err != nil {
 		return err
 	}
@@ -331,6 +380,18 @@ func migrate(cfg config.Config) error {
 	}
 	slog.Info("migrated", "version", version)
 	return nil
+}
+
+func mobilePushConfig(cfg config.Config) mobilepush.Config {
+	return mobilepush.Config{
+		FCMProjectID:       cfg.FCMProjectID,
+		FCMCredentialsFile: cfg.FCMCredentialsFile,
+		APNsKeyFile:        cfg.APNsKeyFile,
+		APNsKeyID:          cfg.APNsKeyID,
+		APNsTeamID:         cfg.APNsTeamID,
+		APNsTopic:          cfg.APNsTopic,
+		APNsProduction:     cfg.APNsProduction,
+	}
 }
 
 // redactDSN keeps a connection string loggable by dropping the credentials.

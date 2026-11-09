@@ -121,7 +121,34 @@ row so a later email login resolves to the same user instead of duplicating it.
 GET   /me                 → user + profile + completion (both null pre-onboarding)
 PATCH /me                 → the updated profile
 POST  /me/onboarding      → creates the row; firstName, dateOfBirth, gender required
+DELETE /me                → 204; deletes the account (internal/account)
 ```
+
+`DELETE /me` is one transaction. The `users` row stays as a tombstone
+(`status='deleted'`, `deleted_at`, no personal data) because conversations and
+reports reference it with cascading keys, and a hard delete would erase other
+people's records. Everything personal goes: profile, prompts, answers, photos
+(rows, then files after commit), likes and passes both ways, matches,
+notifications to or about the account, push subscriptions, queue entry, chat
+tickets, refresh tokens, blocks it made, and its sign-in identities — so the
+same Google account signing in later gets a fresh, empty account. Live
+conversations close through `chatlog.ClosePair`, as a block does, and the
+chat hub drops the account's sockets.
+
+Retention decisions:
+
+- **Messages it sent are redacted** (body cleared, `deleted_at` set), not
+  removed, so each thread's sequence stays gap-free for the other person.
+  The other person's messages are left alone.
+- **Except where someone has an open or in-review report about the account**:
+  messages in that reporter's thread are kept until a moderator resolves it, so
+  deleting is not a way to destroy evidence. Nothing purges them afterwards yet.
+- **Reports about it, and by it, are kept**; the tombstone id is the pseudonym.
+- **Blocks others placed on it are kept** — those are their records.
+- Suspended accounts cannot delete themselves (`RequireAuth` refuses them).
+
+DB regression test: `ACCOUNT_TEST_DATABASE_URL` pointing at a database whose
+name ends in `_account_test`, then `go test ./internal/account -v`.
 
 `PATCH /me` takes a partial profile where every field is optional, so absent
 and cleared are different requests. Validation runs before any column is
@@ -275,7 +302,8 @@ Plain HTTP, so treat everything on it as visible on the wire, and rotate
 ## Status
 
 The backend now includes authentication, profiles/photos, discovery, likes/matches,
-safety/moderation and live direct chat. Goose schema version: **7**, plus River's
+safety/moderation, live direct chat and self-service account deletion. Goose
+schema version: **9**, plus River's
 job schema. The chat queries and critical safety transitions have been exercised
 against isolated PostgreSQL; two browser accounts also completed signup,
 onboarding, matching and live messages.

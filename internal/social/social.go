@@ -51,10 +51,22 @@ const newMatchWindow = 24 * time.Hour
 type Service struct {
 	pool  *pgxpool.Pool
 	guard func(http.Handler) http.Handler
+	push  PushHook
 }
+
+// PushHook is told about every in-app notification this package writes,
+// inside the same transaction, so a native push is queued exactly when the
+// notification row commits. kind is the notification kind ("like", "match").
+type PushHook func(ctx context.Context, tx pgx.Tx, userID, kind, title, body, aboutID string) error
 
 func New(pool *pgxpool.Pool, users *auth.Service) *Service {
 	return &Service{pool: pool, guard: users.RequireAuth}
+}
+
+// WithPush sets the hook that queues native pushes for likes and matches.
+func (s *Service) WithPush(hook PushHook) *Service {
+	s.push = hook
+	return s
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +200,7 @@ func (s *Service) Like(ctx context.Context, userID string, input LikeInput) (Lik
 		// Tell them someone liked them, but never who: revealing that is what
 		// the likes screen is for, and naming the person here would give away
 		// the thing the screen exists to show.
-		if err := notify(ctx, tx, input.ProfileID, domain.NotifyLike,
+		if err := s.notify(ctx, tx, input.ProfileID, domain.NotifyLike,
 			"Someone liked you", "Open your likes to see who is waiting.", ""); err != nil {
 			return LikeResult{}, err
 		}
@@ -211,12 +223,12 @@ func (s *Service) Like(ctx context.Context, userID string, input LikeInput) (Lik
 	if err != nil {
 		return LikeResult{}, err
 	}
-	if err := notify(ctx, tx, userID, domain.NotifyMatch, "You have a new match",
+	if err := s.notify(ctx, tx, userID, domain.NotifyMatch, "You have a new match",
 		fmt.Sprintf("You and %s liked each other.", or(theirName, "someone")),
 		input.ProfileID); err != nil {
 		return LikeResult{}, err
 	}
-	if err := notify(ctx, tx, input.ProfileID, domain.NotifyMatch, "You have a new match",
+	if err := s.notify(ctx, tx, input.ProfileID, domain.NotifyMatch, "You have a new match",
 		fmt.Sprintf("You and %s liked each other.", or(myName, "someone")),
 		userID); err != nil {
 		return LikeResult{}, err
@@ -424,7 +436,22 @@ func (s *Service) MarkRead(ctx context.Context, userID, id string) error {
 	return translateFK(err)
 }
 
-func notify(
+// notify writes the in-app notification and, when a push hook is set, queues
+// the matching native push in the same transaction.
+func (s *Service) notify(
+	ctx context.Context, tx pgx.Tx, userID string,
+	kind domain.NotificationKind, title, body, aboutID string,
+) error {
+	if err := writeNotification(ctx, tx, userID, kind, title, body, aboutID); err != nil {
+		return err
+	}
+	if s.push == nil {
+		return nil
+	}
+	return s.push(ctx, tx, userID, string(kind), title, body, aboutID)
+}
+
+func writeNotification(
 	ctx context.Context, tx pgx.Tx, userID string,
 	kind domain.NotificationKind, title, body, aboutID string,
 ) error {

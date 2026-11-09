@@ -14,6 +14,9 @@ import (
 func (s *Service) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /discover", s.guard(http.HandlerFunc(s.handleFeed)))
 	mux.Handle("GET /discover/daily-picks", s.guard(http.HandlerFunc(s.handleDailyPicks)))
+	if s.daily != nil {
+		mux.Handle("GET /discover/daily-edit", s.guard(http.HandlerFunc(s.handleDailyEdit)))
+	}
 	mux.Handle("GET /search", s.guard(http.HandlerFunc(s.handleSearch)))
 
 	// The collection form resolves ids the likes and matches screens already
@@ -21,6 +24,17 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /profiles", s.guard(http.HandlerFunc(s.handlePeople)))
 	mux.Handle("GET /profiles/{id}", s.guard(http.HandlerFunc(s.handleDetail)))
 	mux.Handle("GET /profiles/{id}/suggestions", s.guard(http.HandlerFunc(s.handleSuggestions)))
+	// Exact lookup by handle; "@shakil" and "Shakil" both work.
+	mux.Handle("GET /usernames/{username}", s.guard(http.HandlerFunc(s.handleByUsername)))
+}
+
+func (s *Service) handleByUsername(w http.ResponseWriter, r *http.Request) {
+	found, err := s.ByUsername(r.Context(), auth.UserIDFrom(r.Context()), r.PathValue("username"))
+	if err != nil {
+		httpx.Error(w, r, translate(err))
+		return
+	}
+	httpx.JSON(w, http.StatusOK, found)
 }
 
 // maxIDsPerRequest bounds a batch lookup: well past any screen's needs, and
@@ -48,6 +62,15 @@ func (s *Service) handleDailyPicks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, picks)
+}
+
+func (s *Service) handleDailyEdit(w http.ResponseWriter, r *http.Request) {
+	edit, err := s.DailyEdit(r.Context(), auth.UserIDFrom(r.Context()))
+	if err != nil {
+		httpx.Error(w, r, translate(err))
+		return
+	}
+	httpx.JSON(w, http.StatusOK, edit)
 }
 
 func (s *Service) handleSearch(w http.ResponseWriter, r *http.Request) {

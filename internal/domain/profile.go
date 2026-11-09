@@ -109,7 +109,10 @@ type DatingPreferences struct {
 type Profile struct {
 	ID        string `json:"id"`
 	FirstName string `json:"firstName"`
-	Age       int    `json:"age"`
+	// Username is the unique, public handle (lowercase, no "@"). Unlike the
+	// first name it identifies one person, so it is what friends search by.
+	Username string `json:"username"`
+	Age      int    `json:"age"`
 	// DateOfBirth appears only on your own profile. Age is what a viewer
 	// needs; the exact date belongs to its owner, and Public strips it.
 	DateOfBirth        *time.Time          `json:"dateOfBirth,omitempty"`

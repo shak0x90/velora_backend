@@ -400,6 +400,12 @@
         "properties": {
           "id": { "type": "string", "format": "uuid" },
           "firstName": { "type": "string", "example": "Sam" },
+          "username": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.]{2,19}$",
+            "example": "shakil",
+            "description": "Unique public handle, lowercase, shown as @username. Assigned from the first name at onboarding (shakil, shakil2, …) unless chosen; writable with PATCH /me (a leading @ and capitals are accepted and normalised). 409 #username-taken if someone holds it."
+          },
           "age": { "type": "integer", "description": "Completed years, from dateOfBirth." },
           "dateOfBirth": { "type": "string", "format": "date-time" },
           "gender": { "type": "string", "enum": ["woman", "man", "nonBinary", "other"] },
@@ -540,6 +546,61 @@
           "commonInterests": { "type": "array", "items": { "type": "string" } },
           "insights": { "type": "array", "items": { "type": "string" } },
           "summary": { "type": "string" }
+        }
+      },
+      "DeviceRegistration": {
+        "type": "object",
+        "required": ["platform", "token"],
+        "properties": {
+          "platform": { "type": "string", "enum": ["android", "ios"] },
+          "token": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "The FCM registration token (Android, and iOS via firebase_messaging) or the raw APNs device token. No spaces or slashes."
+          },
+          "appVersion": { "type": "string", "maxLength": 64, "example": "1.0.0+1" }
+        },
+        "additionalProperties": false
+      },
+      "NotificationSettings": {
+        "type": "object",
+        "properties": {
+          "notify": {
+            "type": "object",
+            "properties": {
+              "matches": { "type": "boolean", "description": "New matches and likes." },
+              "messages": { "type": "boolean" },
+              "dailyEdit": { "type": "boolean" },
+              "weekly": { "type": "boolean" }
+            }
+          },
+          "quietHours": {
+            "type": "object",
+            "description": "Pushes inside the window wait until it ends; they are not dropped. start and end are both set or both null. tz is also the zone the Daily Edit day is counted in.",
+            "properties": {
+              "start": { "type": "string", "nullable": true, "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "example": "22:00" },
+              "end": { "type": "string", "nullable": true, "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "example": "07:00" },
+              "tz": { "type": "string", "description": "IANA time zone.", "example": "Asia/Dhaka" }
+            }
+          }
+        },
+        "example": {
+          "notify": { "matches": true, "messages": true, "dailyEdit": true, "weekly": false },
+          "quietHours": { "start": "22:00", "end": "07:00", "tz": "Asia/Dhaka" }
+        }
+      },
+      "DailyEdit": {
+        "type": "object",
+        "properties": {
+          "picks": {
+            "type": "array",
+            "description": "The day's batch minus anyone already passed, liked or matched (or no longer visible), in ranked order.",
+            "items": { "$ref": "#/components/schemas/RankedProfile" }
+          },
+          "date": { "type": "string", "format": "date", "description": "The edit day in the person's zone. A day runs 09:00 to 09:00 local." },
+          "nextBatchAt": { "type": "string", "format": "date-time" },
+          "remaining": { "type": "integer", "description": "Picks still waiting for a decision. 0 means the edit is complete." },
+          "total": { "type": "integer", "description": "How many people the batch started with (normally 5)." }
         }
       },
       "RankedProfile": {
@@ -1701,6 +1762,79 @@
         "responses": { "204": { "description": "Signed out" } }
       }
     },
+    "/me/settings": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Notification preferences and quiet hours",
+        "description": "Everything on, no quiet hours and UTC until first saved.",
+        "responses": {
+          "200": {
+            "description": "Your settings",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/NotificationSettings" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "patch": {
+        "tags": ["me"],
+        "summary": "Change some preferences",
+        "description": "Partial: absent fields keep their value. Send quietHours.start and end as null to turn quiet hours off. Unknown fields are rejected.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/NotificationSettings" },
+              "example": { "notify": { "messages": false }, "quietHours": { "start": "23:00", "end": "07:30" } }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The settings as saved",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/NotificationSettings" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/devices": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Register this phone for native push",
+        "description": "Call after sign-in and whenever the OS rotates the token. A token already registered to another account moves to yours.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRegistration" } }
+          }
+        },
+        "responses": {
+          "204": { "description": "Registered" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/devices/{token}": {
+      "delete": {
+        "tags": ["me"],
+        "summary": "Stop push to this phone",
+        "description": "Call on sign-out. Only removes your own device; 204 even if the token was not on file.",
+        "parameters": [
+          { "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Removed" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
     "/me": {
       "get": {
         "tags": ["me"],
@@ -1740,6 +1874,16 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "409": { "$ref": "#/components/responses/NoProfile" }
+        }
+      },
+      "delete": {
+        "tags": ["me"],
+        "summary": "Delete your account",
+        "description": "Irreversible. Removes the profile, photos, likes, passes, matches, notifications, push subscriptions, sessions and sign-in identities; closes every conversation for the other person; redacts your messages (kept only where someone has an open report about you). Reports are retained for moderation against a tombstone id. Suspended accounts get 403.",
+        "responses": {
+          "204": { "description": "Deleted. Every session and chat socket for the account has ended." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "The account is suspended or already deleted." }
         }
       }
     },
@@ -1928,11 +2072,28 @@
         }
       }
     },
+    "/discover/daily-edit": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "Today's Daily Edit: a stored batch of five",
+        "description": "Made on the first request of the edit day (09:00 to 09:00 in quietHours.tz from /me/settings, default UTC) and then frozen, so reopening the app does not reshuffle it. It only shrinks as you pass or like people in it. Unlike /discover/daily-picks, which is recomputed every time.",
+        "responses": {
+          "200": {
+            "description": "The edit",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/DailyEdit" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/NoProfile" }
+        }
+      }
+    },
     "/search": {
       "get": {
         "tags": ["discovery"],
-        "summary": "Search by name, work, place, or interest",
-        "description": "Ignores your saved age and distance filters — someone typing a name is looking for that person — but still respects who you said you want to see.",
+        "summary": "Search by @username, name, work, place, or interest",
+        "description": "Typed text is a request for particular people, so no dating preference applies (gender, age, distance): you can always find a friend. An exact username (with or without @) comes first. Hidden, blocked, suspended and incognito people stay out. An empty q browses and still respects who you said you want to see.",
         "parameters": [
           { "name": "q", "in": "query", "schema": { "type": "string" }, "example": "ceramicist" }
         ],
@@ -1976,6 +2137,56 @@
             }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/usernames/{username}": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "Find one person by exact username",
+        "description": "Case-insensitive, leading @ optional. Dating preferences do not apply; hidden, blocked, suspended and incognito people answer 404 like a missing name.",
+        "parameters": [
+          { "name": "username", "in": "path", "required": true, "schema": { "type": "string" }, "example": "shakil" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The person",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/RankedProfile" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/NoProfile" }
+        }
+      }
+    },
+    "/usernames/{username}/availability": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Can I have this username?",
+        "description": "Advisory, for live feedback while typing; your own current username counts as available. PATCH /me can still answer 409 if someone takes it first.",
+        "parameters": [
+          { "name": "username", "in": "path", "required": true, "schema": { "type": "string" }, "example": "shakil_bd" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "username": { "type": "string", "description": "Normalised: lowercase, no @." },
+                    "available": { "type": "boolean" },
+                    "detail": { "type": "string", "description": "Why not, when unavailable." }
+                  }
+                },
+                "example": { "username": "shakil", "available": false, "detail": "That username is taken." }
+              }
+            }
+          },
           "401": { "$ref": "#/components/responses/Unauthorized" }
         }
       }
