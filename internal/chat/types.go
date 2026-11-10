@@ -20,6 +20,24 @@ type Message struct {
 	ReplyToID       *string    `json:"replyToId,omitempty"`
 	CreatedAt       time.Time  `json:"createdAt"`
 	DeletedAt       *time.Time `json:"deletedAt,omitempty"`
+	// Attachment is set on kind "image". The bytes are fetched from
+	// GET /conversations/{id}/photos/{attachment.id}, never a public URL.
+	Attachment *Attachment `json:"attachment,omitempty"`
+	// Reactions are grouped by emoji, in the order they were first used.
+	Reactions []Reaction `json:"reactions"`
+}
+
+type Attachment struct {
+	ID     string `json:"id"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+type Reaction struct {
+	Emoji string `json:"emoji"`
+	Count int    `json:"count"`
+	// Mine marks the viewer's own reaction (at most one per message).
+	Mine bool `json:"mine"`
 }
 type Conversation struct {
 	ID               string    `json:"id"`
@@ -47,6 +65,9 @@ type SendInput struct {
 	Body            string  `json:"body"`
 	Kind            string  `json:"kind"`
 	ReplyToID       *string `json:"replyToId"`
+	// AttachmentID names a photo uploaded with POST /conversations/{id}/photos;
+	// required when Kind is "image", where Body becomes an optional caption.
+	AttachmentID *string `json:"attachmentId"`
 }
 type Event struct {
 	Cursor         int64  `json:"cursor,string"`

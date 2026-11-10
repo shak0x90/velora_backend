@@ -26,10 +26,16 @@ type Service struct {
 	enqueue      Enqueue
 	sendLimit    *httpx.Limiter
 	requestLimit *httpx.Limiter
+	reactLimit   *httpx.Limiter
+	photoLimit   *httpx.Limiter
+	// photos is nil until WithPhotos: uploads then answer 503.
+	photos PhotoStore
 }
 
 func New(pool *pgxpool.Pool, users *auth.Service, origins []string, enqueue Enqueue) *Service {
-	s := &Service{pool: pool, users: users, origins: origins, enqueue: enqueue, sendLimit: httpx.NewLimiter(60, time.Minute), requestLimit: httpx.NewLimiter(20, 24*time.Hour)}
+	s := &Service{pool: pool, users: users, origins: origins, enqueue: enqueue,
+		sendLimit: httpx.NewLimiter(60, time.Minute), requestLimit: httpx.NewLimiter(20, 24*time.Hour),
+		reactLimit: httpx.NewLimiter(120, time.Minute), photoLimit: httpx.NewLimiter(60, time.Hour)}
 	s.hub = NewHub(s)
 	return s
 }
@@ -63,6 +69,7 @@ func (s *Service) prune(ctx context.Context) {
 		if n := tag.RowsAffected(); n > 0 {
 			slog.Info("pruned chat events", "rows", n, "olderThanDays", eventRetentionDays)
 		}
+		s.pruneUnsentPhotos(ctx)
 	}
 
 	sweep()
@@ -165,7 +172,7 @@ func (s *Service) Bootstrap(ctx context.Context, user, cursor string) (Snapshot,
   case when c.origin='anonymous' and c.revealed_at is null then 'Anonymous connection' else coalesce(p.first_name,'Velora member') end,
   me.participant_id::text,c.last_seq,me.last_read_seq,other.last_read_seq,other.last_delivered_seq,
   (select count(*) from messages m where m.conversation_id=c.id and m.seq>me.last_read_seq and m.sender_id<>$1 and m.deleted_at is null),
-  coalesce((select case when deleted_at is null then body else 'Message deleted' end from messages where conversation_id=c.id order by seq desc limit 1),''),
+  coalesce((select case when deleted_at is not null then 'Message deleted' when kind='image' and body='' then '📷 Photo' when kind='image' then '📷 '||body else body end from messages where conversation_id=c.id order by seq desc limit 1),''),
   coalesce(c.last_message_at,c.created_at),me.muted,me.archived,
   c.state='open' or (c.state='pending' and c.requested_by=$1 and c.last_seq=0),
   c.state='pending' and c.requested_by<>$1,
@@ -303,8 +310,27 @@ func validateMessage(in SendInput) (SendInput, error) {
 	if in.Kind == "" {
 		in.Kind = "text"
 	}
-	if in.Kind != "text" || !utf8.ValidString(in.Body) || in.Body == "" || utf8.RuneCountInString(in.Body) > 4000 || len(in.Body) > 16000 {
+	if !utf8.ValidString(in.Body) || utf8.RuneCountInString(in.Body) > 4000 || len(in.Body) > 16000 {
 		return in, httpx.BadRequest("Send text between 1 and 4,000 characters.")
+	}
+	switch in.Kind {
+	case "text":
+		if in.Body == "" {
+			return in, httpx.BadRequest("Send text between 1 and 4,000 characters.")
+		}
+		if in.AttachmentID != nil {
+			return in, httpx.BadRequest("Only photo messages carry an attachment.")
+		}
+	case "image":
+		// The body is an optional caption.
+		if in.AttachmentID == nil {
+			return in, httpx.BadRequest("Upload the photo first and send its attachmentId.")
+		}
+		if _, err := uuid.Parse(*in.AttachmentID); err != nil {
+			return in, httpx.BadRequest("Invalid attachmentId.")
+		}
+	default:
+		return in, httpx.BadRequest("Messages are text or image.")
 	}
 	if in.ReplyToID != nil {
 		if _, err := uuid.Parse(*in.ReplyToID); err != nil {
@@ -338,7 +364,8 @@ func (s *Service) insert(ctx context.Context, tx pgx.Tx, c thread, user string, 
 	existing, err = readMessage(ctx, tx, user, `m.conversation_id=$2 and m.sender_id=$1 and m.client_message_id=$3`, c.ID, in.ClientMessageID)
 	if err == nil {
 		sameReply := (existing.ReplyToID == nil && in.ReplyToID == nil) || (existing.ReplyToID != nil && in.ReplyToID != nil && *existing.ReplyToID == *in.ReplyToID)
-		if existing.Body != in.Body || !sameReply {
+		sameAttachment := (existing.Attachment == nil && in.AttachmentID == nil) || (existing.Attachment != nil && in.AttachmentID != nil && existing.Attachment.ID == *in.AttachmentID)
+		if existing.Body != in.Body || existing.Kind != in.Kind || !sameReply || !sameAttachment {
 			return Message{}, httpx.BadRequest("This clientMessageId already identifies a different message.")
 		}
 		return existing, nil
@@ -348,6 +375,10 @@ func (s *Service) insert(ctx context.Context, tx pgx.Tx, c thread, user string, 
 	}
 	if c.State != "open" && (c.State != "pending" || c.Requester != user || c.Last != 0) {
 		return Message{}, forbidden
+	}
+	// A first-message request is one line of text, not a photo from a stranger.
+	if in.Kind == "image" && c.State != "open" {
+		return Message{}, httpx.Forbidden("Photos can be sent once the chat is open.")
 	}
 	if ok, _ := s.sendLimit.Allow(user); !ok {
 		return Message{}, httpx.TooManyRequests("Please slow down before sending another message.")
@@ -366,8 +397,18 @@ func (s *Service) insert(ctx context.Context, tx pgx.Tx, c thread, user string, 
 		return Message{}, err
 	}
 	id := uuid.NewString()
-	if _, err = tx.Exec(ctx, `insert into messages(id,conversation_id,seq,sender_id,body,kind,client_message_id,reply_to_id) values($1,$2,$3,$4,$5,'text',$6,$7)`, id, c.ID, seq, user, in.Body, in.ClientMessageID, in.ReplyToID); err != nil {
+	if _, err = tx.Exec(ctx, `insert into messages(id,conversation_id,seq,sender_id,body,kind,client_message_id,reply_to_id) values($1,$2,$3,$4,$5,$8,$6,$7)`, id, c.ID, seq, user, in.Body, in.ClientMessageID, in.ReplyToID, in.Kind); err != nil {
 		return Message{}, err
+	}
+	if in.Kind == "image" {
+		// Claimed exactly once, by its uploader, in its own conversation.
+		tag, err := tx.Exec(ctx, `update message_attachments set message_id=$1 where id=$2 and conversation_id=$3 and uploader_id=$4 and message_id is null`, id, *in.AttachmentID, c.ID, user)
+		if err != nil {
+			return Message{}, err
+		}
+		if tag.RowsAffected() != 1 {
+			return Message{}, httpx.BadRequest("That photo is no longer available. Choose it again.")
+		}
 	}
 	if _, err = tx.Exec(ctx, `update conversation_participants set archived=false where conversation_id=$1`, c.ID); err != nil {
 		return Message{}, err
@@ -391,16 +432,33 @@ func (s *Service) insert(ctx context.Context, tx pgx.Tx, c thread, user string, 
 	return readMessage(ctx, tx, user, `m.id=$2`, id)
 }
 
-const messageColumns = `m.id::text,m.conversation_id::text,m.seq,m.client_message_id,p.participant_id::text,m.sender_id=$1,case when m.deleted_at is null then m.body else '' end,m.kind,m.reply_to_id::text,m.created_at,m.deleted_at`
+// A deleted message keeps no attachment: the photo goes with the text.
+const messageColumns = `m.id::text,m.conversation_id::text,m.seq,m.client_message_id,p.participant_id::text,m.sender_id=$1,case when m.deleted_at is null then m.body else '' end,m.kind,m.reply_to_id::text,m.created_at,m.deleted_at,case when m.deleted_at is null then a.id::text end,a.width,a.height`
+
+const messageFrom = ` from messages m join conversation_participants p on p.conversation_id=m.conversation_id and p.user_id=m.sender_id left join message_attachments a on a.message_id=m.id `
 
 func scanMessage(row pgx.Row) (Message, error) {
 	var m Message
-	err := row.Scan(&m.ID, &m.ConversationID, &m.Seq, &m.ClientMessageID, &m.SenderID, &m.Mine, &m.Body, &m.Kind, &m.ReplyToID, &m.CreatedAt, &m.DeletedAt)
+	var attID *string
+	var attW, attH *int
+	err := row.Scan(&m.ID, &m.ConversationID, &m.Seq, &m.ClientMessageID, &m.SenderID, &m.Mine, &m.Body, &m.Kind, &m.ReplyToID, &m.CreatedAt, &m.DeletedAt, &attID, &attW, &attH)
+	if attID != nil && attW != nil && attH != nil {
+		m.Attachment = &Attachment{ID: *attID, Width: *attW, Height: *attH}
+	}
+	m.Reactions = []Reaction{}
 	return m, err
 }
 func readMessage(ctx context.Context, tx pgx.Tx, user, where string, args ...any) (Message, error) {
 	params := append([]any{user}, args...)
-	return scanMessage(tx.QueryRow(ctx, `select `+messageColumns+` from messages m join conversation_participants p on p.conversation_id=m.conversation_id and p.user_id=m.sender_id where `+where, params...))
+	m, err := scanMessage(tx.QueryRow(ctx, `select `+messageColumns+messageFrom+`where `+where, params...))
+	if err != nil {
+		return m, err
+	}
+	list := []Message{m}
+	if err = withReactions(ctx, tx, user, list); err != nil {
+		return m, err
+	}
+	return list[0], nil
 }
 func (s *Service) History(ctx context.Context, user, id string, after, before int64, limit int) (History, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -415,7 +473,7 @@ func (s *Service) History(ctx context.Context, user, id string, after, before in
 	if after >= 0 {
 		order = "asc"
 	}
-	rows, err := tx.Query(ctx, `select `+messageColumns+` from messages m join conversation_participants p on p.conversation_id=m.conversation_id and p.user_id=m.sender_id where m.conversation_id=$2 and ($3::bigint<0 or m.seq>$3) and ($4::bigint=0 or m.seq<$4) order by m.seq `+order+` limit $5`, user, id, after, before, limit+1)
+	rows, err := tx.Query(ctx, `select `+messageColumns+messageFrom+`where m.conversation_id=$2 and ($3::bigint<0 or m.seq>$3) and ($4::bigint=0 or m.seq<$4) order by m.seq `+order+` limit $5`, user, id, after, before, limit+1)
 	if err != nil {
 		return History{}, err
 	}
@@ -441,6 +499,9 @@ func (s *Service) History(ctx context.Context, user, id string, after, before in
 		for i, j := 0, len(out.Messages)-1; i < j; i, j = i+1, j-1 {
 			out.Messages[i], out.Messages[j] = out.Messages[j], out.Messages[i]
 		}
+	}
+	if err = withReactions(ctx, tx, user, out.Messages); err != nil {
+		return out, err
 	}
 	return out, tx.Commit(ctx)
 }

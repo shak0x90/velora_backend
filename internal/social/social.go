@@ -363,7 +363,10 @@ func (s *Service) Matches(ctx context.Context, userID string) ([]domain.MatchRec
 		       case when mt.user_a = $1 then mt.user_b::text else mt.user_a::text end as other_id,
 		       mt.created_at,
 		       coalesce((
-		           select case when m.deleted_at is null then m.body else 'Message deleted' end
+		           select case when m.deleted_at is not null then 'Message deleted'
+		                       when m.kind = 'image' and m.body = '' then '📷 Photo'
+		                       when m.kind = 'image' then '📷 ' || m.body
+		                       else m.body end
 		           from messages m where m.conversation_id = c.id
 		           order by m.seq desc limit 1
 		       ), ''),

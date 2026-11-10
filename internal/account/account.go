@@ -40,6 +40,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shak0x90/velora_backend/internal/auth"
+	"github.com/shak0x90/velora_backend/internal/chat"
 	"github.com/shak0x90/velora_backend/internal/chatlog"
 	"github.com/shak0x90/velora_backend/internal/media"
 )
@@ -50,9 +51,10 @@ import (
 var ErrNotActive = errors.New("account is not active")
 
 type Service struct {
-	pool  *pgxpool.Pool
-	store media.Store
-	guard func(http.Handler) http.Handler
+	pool       *pgxpool.Pool
+	store      media.Store
+	chatPhotos chat.PhotoStore
+	guard      func(http.Handler) http.Handler
 }
 
 func New(pool *pgxpool.Pool, store media.Store, users *auth.Service) *Service {
@@ -116,6 +118,24 @@ func (s *Service) Delete(ctx context.Context, userID string) error {
 		return err
 	}
 
+	// Chat photos follow their messages: gone where the message was just
+	// redacted (or was never sent), kept where an open report holds the
+	// thread as evidence.
+	rows, err := tx.Query(ctx, `
+		delete from message_attachments a
+		where a.uploader_id = $1
+		  and (a.message_id is null
+		       or exists (select 1 from messages m where m.id = a.message_id and m.deleted_at is not null))
+		returning a.object_key
+	`, userID)
+	if err != nil {
+		return err
+	}
+	chatPhotos, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+
 	for _, statement := range purgeStatements {
 		if _, err = tx.Exec(ctx, statement, userID); err != nil {
 			return err
@@ -132,7 +152,14 @@ func (s *Service) Delete(ctx context.Context, userID string) error {
 	}
 
 	removeFiles(ctx, s.store, userID, keys)
+	chat.RemovePhotoFiles(ctx, s.chatPhotos, chatPhotos)
 	return nil
+}
+
+// WithChatPhotos lets deletion remove the account's chat photo files.
+func (s *Service) WithChatPhotos(store chat.PhotoStore) *Service {
+	s.chatPhotos = store
+	return s
 }
 
 // purgeStatements remove every row that is the account's own data. Each takes
@@ -150,6 +177,7 @@ var purgeStatements = []string{
 	`delete from reveal_consents where user_id = $1`,
 	`delete from chat_push_subscriptions where user_id = $1`,
 	`delete from devices where user_id = $1`,
+	`delete from message_reactions where user_id = $1`,
 	`delete from user_settings where user_id = $1`,
 	`delete from daily_edits where user_id = $1 or profile_id = $1`,
 	`delete from chat_queue where user_id = $1`,

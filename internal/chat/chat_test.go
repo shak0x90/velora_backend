@@ -375,7 +375,13 @@ func TestWebSocketUpgradeReplayAndTicketReuse(t *testing.T) {
 		}
 		return ws
 	}
-	tok := ticket(t, server.URL, f.b)
+	// The 50 ms write timeout above is for the hijacked socket. A ticket
+	// request does database work that can outlast it on a slow machine, which
+	// cut the response off as EOF; tickets live in the database, so any server
+	// on the same service can issue one.
+	plain := httptest.NewServer(mux)
+	defer plain.Close()
+	tok := ticket(t, plain.URL, f.b)
 	ws := connect(tok)
 	defer ws.Close()
 	ws.SetReadDeadline(time.Now().Add(5 * time.Second))

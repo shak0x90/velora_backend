@@ -39,24 +39,48 @@
           },
           "body": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 4000
+            "maxLength": 4000,
+            "description": "Required (1–4000 chars) for text; an optional caption for image."
           },
           "kind": {
             "type": "string",
             "enum": [
-              "text"
-            ]
+              "text",
+              "image"
+            ],
+            "default": "text"
           },
           "replyToId": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "A non-deleted message in the same conversation."
+          },
+          "attachmentId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Required for kind image: the id from POST /conversations/{id}/photos. Each upload attaches to exactly one message."
           }
         },
         "required": [
-          "clientMessageId",
-          "body"
+          "clientMessageId"
         ]
+      },
+      "ChatAttachment": {
+        "type": "object",
+        "description": "A photo. Fetch the bytes from GET /conversations/{id}/photos/{attachment.id} with the bearer token; there is no public URL.",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "width": { "type": "integer", "description": "Of the full size (fits 1600×1600)." },
+          "height": { "type": "integer" }
+        }
+      },
+      "ChatReaction": {
+        "type": "object",
+        "properties": {
+          "emoji": { "type": "string", "enum": ["❤️", "😂", "😮", "😢", "😡", "👍"] },
+          "count": { "type": "integer" },
+          "mine": { "type": "boolean", "description": "The viewer's own reaction; at most one per message." }
+        }
       },
       "ChatMessage": {
         "type": "object",
@@ -92,7 +116,8 @@
           "kind": {
             "type": "string",
             "enum": [
-              "text"
+              "text",
+              "image"
             ]
           },
           "replyToId": {
@@ -106,6 +131,12 @@
           "deletedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "attachment": { "$ref": "#/components/schemas/ChatAttachment" },
+          "reactions": {
+            "type": "array",
+            "description": "Grouped by emoji, in first-used order. Empty on deleted messages.",
+            "items": { "$ref": "#/components/schemas/ChatReaction" }
           }
         },
         "required": [
@@ -931,6 +962,79 @@
           }
         },
         "description": "A dating conversation requires an active mutual match. A request requires one text introduction and clientMessageId. Reuse that ID if the response is lost."
+      }
+    },
+    "/conversations/{id}/messages/{messageId}/reaction": {
+      "put": {
+        "tags": ["chat"],
+        "summary": "React to a message",
+        "description": "One reaction per person per message; a different emoji replaces yours. Open conversations only. Both people get a message.edited event.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "messageId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "emoji": { "type": "string", "enum": ["❤️", "😂", "😮", "😢", "😡", "👍"] } }, "required": ["emoji"] } } }
+        },
+        "responses": {
+          "200": { "description": "The message with its reactions", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatMessage" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "tags": ["chat"],
+        "summary": "Remove your reaction",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "messageId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "The message with its reactions", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatMessage" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/conversations/{id}/photos": {
+      "post": {
+        "tags": ["chat"],
+        "summary": "Upload a photo to send",
+        "description": "Multipart field 'photo' (JPEG, PNG or WebP, ≤10 MB, ≤30 MP). Re-encoded to JPEG with all metadata (GPS included) stripped, stored privately. Open conversations only — not a pending request. Then send {kind: image, attachmentId}. Unsent uploads are deleted after 24 h. 60 per hour.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "multipart/form-data": { "schema": { "type": "object", "properties": { "photo": { "type": "string", "format": "binary" } }, "required": ["photo"] } } }
+        },
+        "responses": {
+          "201": { "description": "Uploaded", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatAttachment" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "The conversation is not open (a pending request)." },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "description": "Too many photos this hour." }
+        }
+      }
+    },
+    "/conversations/{id}/photos/{photoId}": {
+      "get": {
+        "tags": ["chat"],
+        "summary": "A chat photo's bytes",
+        "description": "Only for the two people in the conversation, under the same rules as reading it (blocks, closures, unmatching all cut it off). A photo not yet sent is visible to its uploader only. Cache-Control is private.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "photoId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "size", "in": "query", "schema": { "type": "string", "enum": ["full", "thumb"], "default": "full" }, "description": "full fits 1600 px, thumb fits 480 px." }
+        ],
+        "responses": {
+          "200": { "description": "JPEG", "content": { "image/jpeg": { "schema": { "type": "string", "format": "binary" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
       }
     },
     "/conversations/{id}/messages": {

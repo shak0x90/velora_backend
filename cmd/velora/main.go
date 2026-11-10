@@ -194,7 +194,8 @@ func serve(cfg config.Config) error {
 	social.New(pool, authService).WithPush(mobileQueue.SocialHook).Routes(mux)
 	safety.New(pool, authService).Routes(mux)
 	// DELETE /me. Needs the store directly: photo files go after the commit.
-	account.New(pool, mediaStore, authService).Routes(mux)
+	chatPhotos := chat.DirStore{Root: cfg.ChatMediaRoot}
+	account.New(pool, mediaStore, authService).WithChatPhotos(chatPhotos).Routes(mux)
 	pushQueue, err := chatpush.New(pool, chatpush.Config{PublicKey: cfg.VAPIDPublicKey, PrivateKey: cfg.VAPIDPrivateKey, Subject: cfg.VAPIDSubject}, false)
 	if err != nil {
 		return err
@@ -208,6 +209,7 @@ func serve(cfg config.Config) error {
 			}
 			return mobileQueue.MessageHook(ctx, tx, messageID, recipientID, seq)
 		})
+	chatService.WithPhotos(chatPhotos)
 	chatService.Routes(mux)
 	chatCtx, cancelChat := context.WithCancel(ctx)
 	defer cancelChat()

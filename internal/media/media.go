@@ -121,32 +121,9 @@ type Derived struct {
 // Output is JPEG only for now. WebP and AVIF need either cgo or a CDN that
 // negotiates format; both arrive with the move to R2.
 func Process(userID string, raw []byte) ([]Derived, error) {
-	if len(raw) == 0 {
-		return nil, ErrUnsupportedImage
-	}
-	if len(raw) > MaxUploadBytes {
-		return nil, fmt.Errorf("image is larger than %d MB", MaxUploadBytes>>20)
-	}
-
-	// Read the header before the pixels. DecodeConfig parses dimensions without
-	// allocating the bitmap, which is the only chance to refuse an image that
-	// is small on disk and enormous in memory.
-	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	src, err := Decode(raw)
 	if err != nil {
-		return nil, ErrUnsupportedImage
-	}
-	if config.Width <= 0 || config.Height <= 0 {
-		return nil, ErrUnsupportedImage
-	}
-	if int64(config.Width)*int64(config.Height) > MaxPixels {
-		return nil, fmt.Errorf(
-			"image is %dx%d; the limit is %d megapixels",
-			config.Width, config.Height, MaxPixels/1_000_000)
-	}
-
-	src, err := imaging.Decode(bytes.NewReader(raw), imaging.AutoOrientation(true))
-	if err != nil {
-		return nil, ErrUnsupportedImage
+		return nil, err
 	}
 
 	// Content-addressed prefix: the same bytes always land on the same key, and
@@ -186,6 +163,53 @@ func Process(userID string, raw []byte) ([]Derived, error) {
 		})
 	}
 	return out, nil
+}
+
+// Decode is the guarded half of Process, shared with chat photos: it refuses
+// empty, oversized and decompression-bomb uploads before allocating pixels,
+// and applies EXIF orientation. The caller must re-encode what it stores —
+// that re-encode is what strips GPS and every other piece of metadata.
+func Decode(raw []byte) (image.Image, error) {
+	if len(raw) == 0 {
+		return nil, ErrUnsupportedImage
+	}
+	if len(raw) > MaxUploadBytes {
+		return nil, fmt.Errorf("image is larger than %d MB", MaxUploadBytes>>20)
+	}
+
+	// Read the header before the pixels. DecodeConfig parses dimensions without
+	// allocating the bitmap, which is the only chance to refuse an image that
+	// is small on disk and enormous in memory.
+	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, ErrUnsupportedImage
+	}
+	if config.Width <= 0 || config.Height <= 0 {
+		return nil, ErrUnsupportedImage
+	}
+	if int64(config.Width)*int64(config.Height) > MaxPixels {
+		return nil, fmt.Errorf(
+			"image is %dx%d; the limit is %d megapixels",
+			config.Width, config.Height, MaxPixels/1_000_000)
+	}
+
+	src, err := imaging.Decode(bytes.NewReader(raw), imaging.AutoOrientation(true))
+	if err != nil {
+		return nil, ErrUnsupportedImage
+	}
+	return src, nil
+}
+
+// EncodeJPEG fits img inside maxSide×maxSide (never upscaling) and encodes it
+// as JPEG with no metadata.
+func EncodeJPEG(img image.Image, maxSide int) ([]byte, int, int, error) {
+	resized := imaging.Fit(img, maxSide, maxSide, imaging.Lanczos)
+	buf := new(bytes.Buffer)
+	if err := imaging.Encode(buf, resized, imaging.JPEG, imaging.JPEGQuality(jpegQuality)); err != nil {
+		return nil, 0, 0, err
+	}
+	b := resized.Bounds()
+	return buf.Bytes(), b.Dx(), b.Dy(), nil
 }
 
 // KeyFor returns the stored key for a variant of an already-processed photo.

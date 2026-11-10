@@ -31,6 +31,10 @@ type Config struct {
 	// media.Store implementation and these two values.
 	MediaRoot    string
 	MediaBaseURL string
+	// ChatMediaRoot holds chat photos. It must NOT be under MediaRoot or any
+	// directory a web server publishes: chat photos are served only through
+	// the authenticated API route.
+	ChatMediaRoot string
 	// RegisterPerHour caps new accounts from one address. Generous for a person
 	// testing, ruinous for a script filling the database.
 	RegisterPerHour int
@@ -74,6 +78,7 @@ func Load() (Config, error) {
 		GoogleOnly:      getBool("GOOGLE_ONLY_AUTH", true),
 		MediaRoot:       getString("MEDIA_ROOT", "/var/www/velora-media"),
 		MediaBaseURL:    getString("MEDIA_BASE_URL", "http://localhost:8080/media"),
+		ChatMediaRoot:   getString("CHAT_MEDIA_ROOT", "/var/lib/velora/chat-media"),
 		VAPIDPublicKey:  os.Getenv("VAPID_PUBLIC_KEY"),
 		VAPIDPrivateKey: os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject:    os.Getenv("VAPID_SUBJECT"),
