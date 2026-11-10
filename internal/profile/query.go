@@ -43,8 +43,12 @@ type Point struct{ Lat, Lng float64 }
 const distanceExpr = `
 	case
 		when $%d::float8 is null or lat is null or lng is null then 0
-		else earth_distance(ll_to_earth($%d, $%d), ll_to_earth(lat, lng)) / 1000
+		else greatest(1, round(earth_distance(ll_to_earth($%d, $%d), ll_to_earth(lat, lng)) / 1000))
 	end`
+
+// Distances leave the server as whole kilometres, at least 1. An exact
+// figure lets anyone triangulate where someone lives from three readings
+// taken at different spots, which on a dating app is a stalking tool.
 
 // query runs a profile read and enriches the results. `where` is interpolated
 // but never carries user input: callers pass literal predicates and bind their
