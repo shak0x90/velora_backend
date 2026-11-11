@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"github.com/google/uuid"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,8 +30,13 @@ type call struct{ op, user, platform, token, version string }
 
 type fakeDevices struct{ calls []call }
 
-func (f *fakeDevices) Register(_ context.Context, userID string, d Device) error {
+func (f *fakeDevices) Register(_ context.Context, userID string, d Device) (int, error) {
 	f.calls = append(f.calls, call{"register", userID, d.Platform, d.Token, d.AppVersion})
+	return 3, nil
+}
+
+func (f *fakeDevices) Ack(_ context.Context, id uuid.UUID) error {
+	f.calls = append(f.calls, call{"ack", "", "", id.String(), ""})
 	return nil
 }
 
@@ -56,8 +62,11 @@ func serve(t *testing.T, method, path, body string) (*httptest.ResponseRecorder,
 
 func TestRegisterDevice(t *testing.T) {
 	rec, store := serve(t, http.MethodPost, "/devices", `{"platform":" Android ","token":"fcm:abc-123_x","appVersion":"1.2.0+14"}`)
-	if rec.Code != http.StatusNoContent {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"missedPushes":3}` {
+		t.Errorf("body = %s, want the missed-push count", got)
 	}
 	want := call{"register", "user-1", "android", "fcm:abc-123_x", "1.2.0+14"}
 	if len(store.calls) != 1 || store.calls[0] != want {
@@ -99,6 +108,33 @@ func TestUnregisterDeviceIsScopedAndIdempotent(t *testing.T) {
 	want := call{"unregister", "user-1", "", "fcm:abc-123", ""}
 	if len(store.calls) != 1 || store.calls[0] != want {
 		t.Fatalf("calls = %+v, want %+v", store.calls, want)
+	}
+}
+
+func TestAckNeedsNoSignInAndChecksTheID(t *testing.T) {
+	id := uuid.NewString()
+	// serve's guard would add a user; /push/ack must not depend on it, so use
+	// a mux without one.
+	store := &fakeDevices{}
+	d := &Devices{store: store, guard: func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) })
+	}}
+	mux := http.NewServeMux()
+	d.Routes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/push/ack", strings.NewReader(`{"id":"`+id+`"}`)))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(store.calls) != 1 || store.calls[0].token != id {
+		t.Fatalf("calls = %+v", store.calls)
+	}
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/push/ack", strings.NewReader(`{"id":"not-a-uuid"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad id: status %d, want 400", rec.Code)
 	}
 }
 

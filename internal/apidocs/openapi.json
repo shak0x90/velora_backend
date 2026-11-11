@@ -589,9 +589,25 @@
             "maxLength": 4096,
             "description": "The FCM registration token (Android, and iOS via firebase_messaging) or the raw APNs device token. No spaces or slashes."
           },
-          "appVersion": { "type": "string", "maxLength": 64, "example": "1.0.0+1" }
+          "appVersion": {
+            "type": "string",
+            "maxLength": 64,
+            "example": "1.0.8+9",
+            "description": "Apps that send a version confirm receipt of pushes (POST /push/ack), so their pushes are tracked."
+          }
         },
         "additionalProperties": false
+      },
+      "DeviceRegistered": {
+        "type": "object",
+        "required": ["missedPushes"],
+        "properties": {
+          "missedPushes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Pushes from the last 7 days (older than 2 minutes) the provider accepted but this phone never confirmed, counted since its last confirmed push."
+          }
+        }
       },
       "NotificationSettings": {
         "type": "object",
@@ -1918,7 +1934,12 @@
           }
         },
         "responses": {
-          "204": { "description": "Registered" },
+          "200": {
+            "description": "Registered. missedPushes counts recent pushes this phone never confirmed with POST /push/ack; above zero, the app asks the person to allow it in the background.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRegistered" } }
+            }
+          },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" }
         }
@@ -1936,6 +1957,31 @@
           "204": { "description": "Removed" },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/push/ack": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Confirm a push reached this phone",
+        "description": "Sent by the app for every push it receives, with the pushId from the push data. No sign-in: the random receipt id is the credential, and an unknown id also gets 204.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": { "id": { "type": "string", "format": "uuid" } },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Recorded (or unknown id)" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
         }
       }
     },

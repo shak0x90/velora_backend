@@ -85,10 +85,10 @@ func TestDevicesEnqueueAndWorkAgainstPostgres(t *testing.T) {
 	// Registering moves a token between accounts; unregistering is scoped.
 	store := pgDevices{pool: pool}
 	token := "tok-" + a
-	if err := store.Register(ctx, a, Device{Platform: "android", Token: token, AppVersion: "1.0"}); err != nil {
+	if _, err := store.Register(ctx, a, Device{Platform: "android", Token: token, AppVersion: "1.0"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Register(ctx, b, Device{Platform: "android", Token: token, AppVersion: "1.1"}); err != nil {
+	if _, err := store.Register(ctx, b, Device{Platform: "android", Token: token, AppVersion: "1.1"}); err != nil {
 		t.Fatal(err)
 	}
 	if n := count(`select count(*) from devices where token = $1 and user_id = $2 and app_version = '1.1'`, token, b); n != 1 {
@@ -100,7 +100,7 @@ func TestDevicesEnqueueAndWorkAgainstPostgres(t *testing.T) {
 	if n := count(`select count(*) from devices where token = $1`, token); n != 1 {
 		t.Fatal("another account removed the device")
 	}
-	if err := store.Register(ctx, a, Device{Platform: "android", Token: token}); err != nil {
+	if _, err := store.Register(ctx, a, Device{Platform: "android", Token: token}); err != nil {
 		t.Fatal(err)
 	}
 	var deviceID string
@@ -194,5 +194,79 @@ func TestDevicesEnqueueAndWorkAgainstPostgres(t *testing.T) {
 	// And a job for a device that is gone is a quiet no-op.
 	if err := w.Work(ctx, job); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPushReceiptsCountMissedPushes(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	user := uuid.NewString()
+	if _, err := pool.Exec(ctx, `insert into users (id) values ($1)`, user); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `delete from users where id = $1`, user) })
+
+	store := pgDevices{pool: pool}
+	token := "tok-" + user
+	device := Device{Platform: "android", Token: token, AppVersion: "1.0.8"}
+	if missed, err := store.Register(ctx, user, device); err != nil || missed != 0 {
+		t.Fatalf("fresh device: missed=%d err=%v", missed, err)
+	}
+	var deviceID string
+	if err := pool.QueryRow(ctx, `select id::text from devices where token = $1`, token).Scan(&deviceID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tracked sends record receipts and put the id in the push data.
+	rec := &recorder{}
+	id, err := SendTracked(ctx, pool, rec, deviceID, true, Message{Token: token, Title: "t"})
+	if err != nil || id == "" || rec.sent[0].Data["pushId"] != id {
+		t.Fatalf("tracked send: id=%q err=%v", id, err)
+	}
+	// A failed send leaves no receipt behind.
+	rec.err = errors.New("provider down")
+	if _, err := SendTracked(ctx, pool, rec, deviceID, true, Message{Token: token}); err == nil {
+		t.Fatal("want the provider error")
+	}
+	missed := func() int {
+		t.Helper()
+		n, err := store.Register(ctx, user, device)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	if n := missed(); n != 0 {
+		t.Fatalf("a push still within its grace period counted as missed (%d)", n)
+	}
+	if _, err := pool.Exec(ctx, `update push_receipts set sent_at = now() - interval '5 minutes' where device_id = $1`, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	if n := missed(); n != 1 {
+		t.Fatalf("unconfirmed push: missed = %d, want 1", n)
+	}
+
+	// Confirming it clears the count; a later unconfirmed one counts again.
+	if err := store.Ack(ctx, uuid.MustParse(id)); err != nil {
+		t.Fatal(err)
+	}
+	if n := missed(); n != 0 {
+		t.Fatalf("after ack: missed = %d, want 0", n)
+	}
+	rec.err = nil
+	if _, err := SendTracked(ctx, pool, rec, deviceID, true, Message{Token: token}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `update push_receipts set sent_at = now() - interval '3 minutes' where device_id = $1 and received_at is null`, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	if n := missed(); n != 1 {
+		t.Fatalf("new unconfirmed push after an ack: missed = %d, want 1", n)
+	}
+
+	// Untracked sends (apps that don't confirm) record nothing.
+	if id, err := SendTracked(ctx, pool, rec, deviceID, false, Message{Token: token}); err != nil || id != "" {
+		t.Fatalf("untracked: id=%q err=%v", id, err)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
@@ -219,11 +220,11 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[Args]) error {
 	a := job.Args
 	pool := w.q.pool
 
-	var platform, token string
+	var platform, token, appVersion string
 	err := pool.QueryRow(ctx, `
-		select d.platform, d.token from devices d join users u on u.id = d.user_id
+		select d.platform, d.token, d.app_version from devices d join users u on u.id = d.user_id
 		where d.id = $1 and d.user_id = $2 and u.status = 'active'
-	`, a.DeviceID, a.UserID).Scan(&platform, &token)
+	`, a.DeviceID, a.UserID).Scan(&platform, &token, &appVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // unregistered, moved to another account, or account gone
 	}
@@ -240,6 +241,7 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[Args]) error {
 		return err
 	}
 	if !Allowed(prefs, a.Event) {
+		slog.Info("push skipped", "device", a.DeviceID, "event", a.Event, "reason", "turned off in settings")
 		return nil
 	}
 	if until, quiet := prefs.QuietUntil(w.q.now()); quiet {
@@ -253,15 +255,20 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[Args]) error {
 			return err
 		}
 		if !deliver {
+			slog.Info("push skipped", "device", a.DeviceID, "event", a.Event, "reason", "already read, muted or chat closed")
 			return nil
 		}
 		data = copyWith(data, "conversationId", cid)
 		a.Collapse = "chat-" + cid
 	}
 
-	err = sender.Send(ctx, Message{Token: token, Title: a.Title, Body: a.Body, Data: data, Collapse: a.Collapse})
+	// Apps that report their version also confirm receipt (POST /push/ack).
+	tracked := appVersion != ""
+	_, err = SendTracked(ctx, pool, sender, a.DeviceID, tracked,
+		Message{Token: token, Title: a.Title, Body: a.Body, Data: data, Collapse: a.Collapse})
 	switch {
 	case err == nil:
+		slog.Info("push sent", "device", a.DeviceID, "event", a.Event)
 		_, _ = pool.Exec(ctx, `update devices set last_seen_at = now() where id = $1`, a.DeviceID)
 		return nil
 	case errors.Is(err, ErrUnregistered):
@@ -280,6 +287,27 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[Args]) error {
 // devices: still unread by the recipient, thread not muted, message not
 // deleted, conversation live, both people active, no block either way, and a
 // match conversation still backed by a match.
+// SendTracked hands m to sender. When tracked, it first records a receipt and
+// adds its id to the push data as "pushId"; the app confirms it with
+// POST /push/ack, and receipts left unconfirmed mean the phone dropped the
+// push. Returns the receipt id ("" when untracked or on failure).
+func SendTracked(ctx context.Context, pool *pgxpool.Pool, sender Sender, deviceID string, tracked bool, m Message) (string, error) {
+	if !tracked {
+		return "", sender.Send(ctx, m)
+	}
+	id := uuid.NewString()
+	m.Data = copyWith(m.Data, "pushId", id)
+	if _, err := pool.Exec(ctx, `insert into push_receipts (id, device_id) values ($1, $2)`, id, deviceID); err != nil {
+		return "", err
+	}
+	if err := sender.Send(ctx, m); err != nil {
+		_, _ = pool.Exec(ctx, `delete from push_receipts where id = $1`, id)
+		return "", err
+	}
+	_, _ = pool.Exec(ctx, `delete from push_receipts where device_id = $1 and sent_at < now() - interval '14 days'`, deviceID)
+	return id, nil
+}
+
 func deliverableMessage(ctx context.Context, pool *pgxpool.Pool, messageID, recipientID string) (string, bool, error) {
 	var cid string
 	err := pool.QueryRow(ctx, `

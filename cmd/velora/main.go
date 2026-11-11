@@ -67,6 +67,8 @@ func run() error {
 		return migrate(cfg)
 	case "moderator":
 		return moderator(cfg, os.Args[2:])
+	case "push-test":
+		return pushTest(cfg, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -86,6 +88,9 @@ Usage:
 
   velora moderator <email>          Let this account read the report queue
   velora moderator --revoke <email> Take that away
+
+  velora push-test <username>       Send a test push to that account's phones
+                                    and wait for them to confirm receipt
 
 Configuration is read from the environment; see .env.example.
 `)
@@ -314,6 +319,87 @@ func work(cfg config.Config) error {
 		return err
 	}
 	slog.Info("worker stopped")
+	return nil
+}
+
+// pushTest sends a test notification straight to every phone registered to
+// one account, prints what the provider answered and then waits for the app
+// to confirm receipt, so "I get nothing" splits into "the server could not
+// send", "the phone dropped it" and "it arrived".
+func pushTest(cfg config.Config, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: velora push-test <username>")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	router, err := mobilepush.NewRouter(ctx, mobilePushConfig(cfg))
+	if err != nil {
+		return err
+	}
+
+	rows, err := pool.Query(ctx, `
+		select d.id::text, d.platform, d.token, d.app_version from devices d
+		join profiles p on p.user_id = d.user_id
+		where p.username = $1
+	`, strings.TrimPrefix(strings.ToLower(strings.TrimSpace(args[0])), "@"))
+	if err != nil {
+		return err
+	}
+	type device struct{ id, platform, token, version string }
+	var devices []device
+	for rows.Next() {
+		var d device
+		if err := rows.Scan(&d.id, &d.platform, &d.token, &d.version); err != nil {
+			return err
+		}
+		devices = append(devices, d)
+	}
+	rows.Close()
+	if len(devices) == 0 {
+		return fmt.Errorf("@%s has no registered phone", args[0])
+	}
+	receipts := map[string]string{} // receipt id -> device id
+	for _, d := range devices {
+		sender, ok := router.For(d.platform)
+		if !ok {
+			fmt.Println(d.id, d.platform+": no sender configured for this platform")
+			continue
+		}
+		id, err := mobilepush.SendTracked(ctx, pool, sender, d.id, d.version != "", mobilepush.Message{
+			Token: d.token,
+			Title: "Thapaw test",
+			Body:  "If you can see this, notifications reach this phone.",
+			Data:  map[string]string{"type": "test"},
+		})
+		switch {
+		case err != nil:
+			fmt.Println(d.id, d.platform+": FAILED:", err)
+		case id == "":
+			fmt.Println(d.id, d.platform+": accepted by the provider (this app version does not confirm receipt)")
+		default:
+			fmt.Println(d.id, d.platform+": accepted by the provider; waiting for the phone to confirm...")
+			receipts[id] = d.id
+		}
+	}
+	for waited := 0; waited < 20 && len(receipts) > 0; waited++ {
+		time.Sleep(time.Second)
+		for id, deviceID := range receipts {
+			var got bool
+			if err := pool.QueryRow(ctx, `select received_at is not null from push_receipts where id = $1`, id).Scan(&got); err == nil && got {
+				fmt.Println(deviceID, "confirmed: the phone received it")
+				delete(receipts, id)
+			}
+		}
+	}
+	for _, deviceID := range receipts {
+		fmt.Println(deviceID, "NOT confirmed within 20s: the phone dropped it (battery manager or app force-stopped)")
+	}
 	return nil
 }
 
