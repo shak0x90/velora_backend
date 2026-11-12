@@ -178,6 +178,8 @@ var purgeStatements = []string{
 	`delete from chat_push_subscriptions where user_id = $1`,
 	`delete from devices where user_id = $1`,
 	`delete from blind_hour_reminders where user_id = $1`,
+	`delete from blind_hellos where user_id = $1`,
+	`delete from blind_alerts where recipient = $1`,
 	`delete from message_reactions where user_id = $1`,
 	`delete from user_settings where user_id = $1`,
 	`delete from daily_edits where user_id = $1 or profile_id = $1`,

@@ -18,6 +18,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shak0x90/velora_backend/internal/auth"
 	"github.com/shak0x90/velora_backend/internal/chatlog"
@@ -505,5 +506,83 @@ func TestPairLockSerializesBlockAndSend(t *testing.T) {
 	_, err := f.s.Send(f.ctx, f.a, f.cid, input("after block returned"))
 	if !errors.Is(err, unavailable) {
 		t.Fatal("post-block send", err)
+	}
+}
+
+func TestBlindHelloPairsTheNextSearcher(t *testing.T) {
+	f := setup(t)
+	var looked []string
+	var lookedMu sync.Mutex
+	var answered struct{ author, cid string }
+	f.s.WithBlindHooks(BlindHooks{
+		Looking: func(_ context.Context, uid string) {
+			lookedMu.Lock()
+			looked = append(looked, uid)
+			lookedMu.Unlock()
+		},
+		HelloAnswered: func(_ context.Context, _ pgx.Tx, author, cid string) error {
+			answered.author, answered.cid = author, cid
+			return nil
+		},
+	})
+	mux := http.NewServeMux()
+	f.s.Routes(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	call := func(method, path, uid, body string) (int, map[string]any) {
+		req, _ := http.NewRequest(method, server.URL+path, bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+token(uid))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		out := map[string]any{}
+		json.Unmarshal(data, &out)
+		return resp.StatusCode, out
+	}
+
+	// a searches, finds nobody: waits, and the "someone is looking" hook runs.
+	if _, out := call("POST", "/chat/anonymous", f.a, `{}`); out["waiting"] != true {
+		t.Fatal(out)
+	}
+	time.Sleep(100 * time.Millisecond)
+	lookedMu.Lock()
+	if len(looked) != 1 || looked[0] != f.a {
+		t.Fatalf("looking hook: %v", looked)
+	}
+	lookedMu.Unlock()
+	if code, _ := call("DELETE", "/chat/anonymous", f.a, ``); code != 204 {
+		t.Fatal("leave queue", code)
+	}
+
+	// a leaves a blind hello instead of waiting.
+	if code, out := call("POST", "/chat/anonymous/hello", f.a, `{"body":"  What's the best thing you ate this week?  "}`); code != 200 || out["body"] != "What's the best thing you ate this week?" {
+		t.Fatal("hello", code, out)
+	}
+	if code, _ := call("POST", "/chat/anonymous/hello", f.a, `{"body":""}`); code != 400 {
+		t.Fatal("empty hello accepted", code)
+	}
+
+	// The next compatible searcher is paired with the hello at once.
+	code, out := call("POST", "/chat/anonymous", f.third, `{}`)
+	if code != 200 || out["id"] == nil {
+		t.Fatal("pair with hello", code, out)
+	}
+	cid := out["id"].(string)
+	var body, sender, origin string
+	if err := f.pool.QueryRow(f.ctx, `select m.body, m.sender_id::text, c.origin from messages m join conversations c on c.id=m.conversation_id where m.conversation_id=$1 and m.seq=1`, cid).Scan(&body, &sender, &origin); err != nil {
+		t.Fatal(err)
+	}
+	if body != "What's the best thing you ate this week?" || sender != f.a || origin != "anonymous" {
+		t.Fatalf("first message %q from %s in %s", body, sender, origin)
+	}
+	if answered.author != f.a || answered.cid != cid {
+		t.Fatalf("hello-answered hook: %+v", answered)
+	}
+	var left int
+	if err := f.pool.QueryRow(f.ctx, `select count(*) from blind_hellos where user_id=$1`, f.a).Scan(&left); err != nil || left != 0 {
+		t.Fatal("hello not consumed", left, err)
 	}
 }

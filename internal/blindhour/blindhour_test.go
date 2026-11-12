@@ -63,6 +63,72 @@ func (r *recorder) EnqueueBlindHour(_ context.Context, _ pgx.Tx, userID string) 
 	return nil
 }
 
+func (r *recorder) EnqueueLooking(ctx context.Context, tx pgx.Tx, userID string) error {
+	return r.EnqueueBlindHour(ctx, tx, userID)
+}
+
+// Run with PUSH_TEST_DATABASE_URL=postgres://.../velora_push_test.
+func TestLookingAlertsCompatiblePeopleAtMostEveryFewHours(t *testing.T) {
+	dsn := os.Getenv("PUSH_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set PUSH_TEST_DATABASE_URL to an isolated *_push_test database")
+	}
+	if err := db.Migrate(dsn); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	// searcher wants women; fan is a woman with a phone; man is not her
+	// preference; quiet has the switch off; nophone has no device.
+	searcher, fan, man, quiet, nophone := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	people := map[string]string{searcher: "woman", fan: "woman", man: "man", quiet: "woman", nophone: "woman"}
+	for id, gender := range people {
+		if _, err := pool.Exec(ctx, `insert into users (id, status) values ($1, 'active')`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `insert into profiles (user_id, first_name, birth_date, gender, interested_in) values ($1, 'T', '1995-01-01', $2, '{woman}')`, id, gender); err != nil {
+			t.Fatal(err)
+		}
+		if id != nophone {
+			if _, err := pool.Exec(ctx, `insert into devices (id, user_id, platform, token) values ($1, $2, 'android', $3)`, uuid.New(), id, "tok-"+id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := pool.Exec(ctx, `insert into user_settings (user_id, notify_blind_hour) values ($1, false)`, quiet); err != nil {
+		t.Fatal(err)
+	}
+	all := []string{searcher, fan, man, quiet, nophone}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `delete from users where id = any($1::uuid[])`, all) })
+
+	rec := &recorder{}
+	s := &Service{pool: pool, now: time.Now, alerts: rec}
+	mine := func() []string {
+		var out []string
+		for _, u := range rec.users {
+			for _, p := range all {
+				if u == p {
+					out = append(out, u)
+				}
+			}
+		}
+		return out
+	}
+	s.Looking(ctx, searcher)
+	if got := mine(); len(got) != 1 || got[0] != fan {
+		t.Fatalf("want only the compatible, opted-in person with a phone; got %v", got)
+	}
+	s.Looking(ctx, searcher)
+	if got := mine(); len(got) != 1 {
+		t.Fatalf("alerted again within the window: %v", got)
+	}
+}
+
 // Run with PUSH_TEST_DATABASE_URL=postgres://.../velora_push_test.
 func TestRemindersOncePerDayInLocalTime(t *testing.T) {
 	dsn := os.Getenv("PUSH_TEST_DATABASE_URL")

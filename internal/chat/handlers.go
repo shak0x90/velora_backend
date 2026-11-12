@@ -27,6 +27,8 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	guard("POST /chat/realtime-ticket", s.handleTicket)
 	guard("POST /chat/anonymous", s.handleAnonymous)
 	guard("DELETE /chat/anonymous", s.handleLeaveQueue)
+	guard("POST /chat/anonymous/hello", s.handleLeaveHello)
+	guard("DELETE /chat/anonymous/hello", s.handleDeleteHello)
 	mux.HandleFunc("GET /chat/ws", s.handleSocket)
 }
 func user(r *http.Request) string { return auth.UserIDFrom(r.Context()) }

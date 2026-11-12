@@ -10,6 +10,7 @@ package blindhour
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shak0x90/velora_backend/internal/auth"
+	"github.com/shak0x90/velora_backend/internal/chat"
 	"github.com/shak0x90/velora_backend/internal/httpx"
 	"github.com/shak0x90/velora_backend/internal/settings"
 )
@@ -49,6 +51,15 @@ type Status struct {
 	// (excluding the caller). Real, not rounded up.
 	LookingNow int    `json:"lookingNow"`
 	BlindHour  Period `json:"blindHour"`
+	// MyHello is the caller's waiting blind hello, if any.
+	MyHello *Hello `json:"myHello"`
+	// Practice says the AI practice chat is available (POST /chat/practice).
+	Practice bool `json:"practice"`
+}
+
+type Hello struct {
+	Body      string    `json:"body"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 type Period struct {
@@ -58,9 +69,28 @@ type Period struct {
 }
 
 type Service struct {
-	pool  *pgxpool.Pool
-	guard func(http.Handler) http.Handler
-	now   func() time.Time
+	pool     *pgxpool.Pool
+	guard    func(http.Handler) http.Handler
+	now      func() time.Time
+	alerts   LookingNotifier
+	practice bool
+}
+
+// LookingNotifier sends the "someone is looking" push (mobilepush.Queue).
+type LookingNotifier interface {
+	EnqueueLooking(ctx context.Context, tx pgx.Tx, userID string) error
+}
+
+// WithAlerts enables "someone is looking" pushes.
+func (s *Service) WithAlerts(n LookingNotifier) *Service {
+	s.alerts = n
+	return s
+}
+
+// WithPractice reports whether the AI practice chat is configured.
+func (s *Service) WithPractice(available bool) *Service {
+	s.practice = available
+	return s
 }
 
 func New(pool *pgxpool.Pool, users *auth.Service) *Service {
@@ -86,11 +116,86 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
+	var hello *Hello
+	var h Hello
+	err = s.pool.QueryRow(ctx, `select body, expires_at from blind_hellos where user_id = $1 and expires_at > now()`, uid).
+		Scan(&h.Body, &h.ExpiresAt)
+	switch {
+	case err == nil:
+		hello = &h
+	case !errors.Is(err, pgx.ErrNoRows):
+		httpx.Error(w, r, err)
+		return
+	}
 	start, end, active := Window(s.now(), prefs.Location())
 	httpx.JSON(w, http.StatusOK, Status{
 		LookingNow: looking,
 		BlindHour:  Period{Active: active, StartsAt: start.UTC(), EndsAt: end.UTC()},
+		MyHello:    hello,
+		Practice:   s.practice,
 	})
+}
+
+// alertsPerSearch and alertEvery bound the "someone is looking" pushes: a
+// search alerts at most this many people, and nobody gets one more often.
+const (
+	alertsPerSearch = 10
+	alertEvery      = 3 * time.Hour
+)
+
+// Looking tells up to alertsPerSearch compatible people (switch on, a phone,
+// not searching themselves, not alerted recently) that someone is looking
+// for a blind chat right now, so a small community still pairs. Used as the
+// chat package's BlindHooks.Looking; errors are logged, never surfaced.
+func (s *Service) Looking(ctx context.Context, searcher string) {
+	if s.alerts == nil {
+		return
+	}
+	rows, err := s.pool.Query(ctx, `
+		select p.user_id::text from profiles p
+		join users u on u.id = p.user_id and u.status = 'active'
+		join profiles me on me.user_id = $1
+		left join user_settings st on st.user_id = p.user_id
+		where p.user_id <> $1 and coalesce(st.notify_blind_hour, true)
+		  and exists (select 1 from devices d where d.user_id = p.user_id)
+		  and not exists (select 1 from chat_queue q where q.user_id = p.user_id and q.expires_at > now())
+		  and not exists (select 1 from blind_alerts a where a.recipient = p.user_id and a.sent_at > now() - $2::interval)
+		  and `+chat.CompatibleSQL+`
+		order by random() limit $3
+	`, searcher, alertEvery.String(), alertsPerSearch)
+	if err != nil {
+		slog.Warn("blind alerts", "error", err)
+		return
+	}
+	var recipients []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			recipients = append(recipients, id)
+		}
+	}
+	rows.Close()
+	for _, id := range recipients {
+		if err := s.alertOne(ctx, id); err != nil {
+			slog.Warn("blind alert", "error", err)
+		}
+	}
+	_, _ = s.pool.Exec(ctx, `delete from blind_alerts where sent_at < now() - interval '1 day'`)
+}
+
+func (s *Service) alertOne(ctx context.Context, recipient string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `insert into blind_alerts (recipient) values ($1)`, recipient); err != nil {
+		return err
+	}
+	if err := s.alerts.EnqueueLooking(ctx, tx, recipient); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Notifier is the one thing the reminder loop needs from mobilepush; an

@@ -58,6 +58,11 @@ type Config struct {
 	APNsTeamID         string
 	APNsTopic          string
 	APNsProduction     bool
+
+	// AI practice chat (POST /chat/practice): a file holding an OpenAI API
+	// key, and the model. No file: the practice chat is switched off.
+	OpenAIKeyFile string
+	OpenAIModel   string
 }
 
 func (c Config) IsProduction() bool { return c.Env == "production" }
@@ -90,6 +95,9 @@ func Load() (Config, error) {
 		APNsTeamID:         os.Getenv("APNS_TEAM_ID"),
 		APNsTopic:          os.Getenv("APNS_TOPIC"),
 		APNsProduction:     getBool("APNS_PRODUCTION", false),
+
+		OpenAIKeyFile: os.Getenv("OPENAI_API_KEY_FILE"),
+		OpenAIModel:   getString("OPENAI_MODEL", "gpt-4o-mini"),
 	}
 	// Defaults to on outside production, so a fresh clone has the explorer
 	// without anyone reading the README to find it.

@@ -42,6 +42,9 @@ const (
 	EventDailyEdit = "dailyEdit"
 	EventWeekly    = "weekly"
 	EventBlindHour = "blindHour"
+	// EventBlindHello tells a blind hello's author that someone was paired
+	// with it; it follows the messages switch.
+	EventBlindHello = "blindHello"
 )
 
 // Allowed reports whether s lets event through. Likes ride on the matches
@@ -58,6 +61,8 @@ func Allowed(s settings.Settings, event string) bool {
 		return s.Notify.Weekly
 	case EventBlindHour:
 		return s.Notify.BlindHour
+	case EventBlindHello:
+		return s.Notify.Messages
 	default:
 		return false
 	}
@@ -124,6 +129,29 @@ const messageDelay = 5 * time.Second
 // Enqueue schedules note for every device userID has registered on a
 // configured platform, inside tx. Turned-off categories enqueue nothing;
 // quiet hours delay the job to the end of the window rather than dropping it.
+// EnqueueLooking tells someone that a compatible person is looking for a
+// blind chat right now. Same switch as the Blind hour reminder, and like it
+// skipped (not delayed) during quiet hours.
+func (q *Queue) EnqueueLooking(ctx context.Context, tx pgx.Tx, userID string) error {
+	return q.Enqueue(ctx, tx, userID, Note{
+		Event:    EventBlindHour,
+		Title:    "Someone's looking for a blind chat 🎭",
+		Body:     "Tap to talk now. No photos, no names, until you both say yes.",
+		Data:     map[string]string{"type": "blindLooking"},
+		Collapse: "blind-looking",
+	})
+}
+
+// EnqueueHelloAnswered tells a blind hello's author their blind chat began.
+func (q *Queue) EnqueueHelloAnswered(ctx context.Context, tx pgx.Tx, userID, conversationID string) error {
+	return q.Enqueue(ctx, tx, userID, Note{
+		Event: EventBlindHello,
+		Title: "Someone answered your blind hello 🎭",
+		Body:  "Your blind chat has started.",
+		Data:  map[string]string{"type": "blindHello", "conversationId": conversationID},
+	})
+}
+
 // EnqueueBlindHour queues the daily "Blind hour is open" reminder; tapping
 // it opens anonymous chat. Satisfies blindhour.Notifier.
 func (q *Queue) EnqueueBlindHour(ctx context.Context, tx pgx.Tx, userID string) error {

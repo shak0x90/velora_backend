@@ -30,12 +30,17 @@ type Service struct {
 	photoLimit   *httpx.Limiter
 	// photos is nil until WithPhotos: uploads then answer 503.
 	photos PhotoStore
+	// blind holds the optional blind-chat notification hooks.
+	blind BlindHooks
+	// lookLimit spaces out "someone is looking" alerts per searcher.
+	lookLimit *httpx.Limiter
 }
 
 func New(pool *pgxpool.Pool, users *auth.Service, origins []string, enqueue Enqueue) *Service {
 	s := &Service{pool: pool, users: users, origins: origins, enqueue: enqueue,
 		sendLimit: httpx.NewLimiter(60, time.Minute), requestLimit: httpx.NewLimiter(20, 24*time.Hour),
-		reactLimit: httpx.NewLimiter(120, time.Minute), photoLimit: httpx.NewLimiter(60, time.Hour)}
+		reactLimit: httpx.NewLimiter(120, time.Minute), photoLimit: httpx.NewLimiter(60, time.Hour),
+		lookLimit: httpx.NewLimiter(1, 15*time.Minute)}
 	s.hub = NewHub(s)
 	return s
 }

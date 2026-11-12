@@ -32,6 +32,7 @@ import (
 	"github.com/shak0x90/velora_backend/internal/httpx"
 	"github.com/shak0x90/velora_backend/internal/media"
 	"github.com/shak0x90/velora_backend/internal/mobilepush"
+	"github.com/shak0x90/velora_backend/internal/practice"
 	"github.com/shak0x90/velora_backend/internal/profile"
 	"github.com/shak0x90/velora_backend/internal/safety"
 	"github.com/shak0x90/velora_backend/internal/settings"
@@ -196,7 +197,6 @@ func serve(cfg config.Config) error {
 	}
 	mobilepush.NewDevices(pool, authService).Routes(mux)
 	settings.New(pool, authService).Routes(mux)
-	blindhour.New(pool, authService).Routes(mux)
 
 	social.New(pool, authService).WithPush(mobileQueue.SocialHook).Routes(mux)
 	safety.New(pool, authService).Routes(mux)
@@ -217,6 +217,19 @@ func serve(cfg config.Config) error {
 			return mobileQueue.MessageHook(ctx, tx, messageID, recipientID, seq)
 		})
 	chatService.WithPhotos(chatPhotos)
+	// Blind chat for a small community: blind hellos, "someone is looking"
+	// pushes, and the clearly labelled AI practice chat.
+	practiceService, err := practice.New(cfg.OpenAIKeyFile, cfg.OpenAIModel, authService)
+	if err != nil {
+		return err
+	}
+	practiceService.Routes(mux)
+	blind := blindhour.New(pool, authService).WithAlerts(mobileQueue).WithPractice(practiceService.Available())
+	blind.Routes(mux)
+	chatService.WithBlindHooks(chat.BlindHooks{
+		Looking:       blind.Looking,
+		HelloAnswered: mobileQueue.EnqueueHelloAnswered,
+	})
 	chatService.Routes(mux)
 	chatCtx, cancelChat := context.WithCancel(ctx)
 	defer cancelChat()

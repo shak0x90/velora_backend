@@ -1424,6 +1424,13 @@
                   "required": ["lookingNow", "blindHour"],
                   "properties": {
                     "lookingNow": { "type": "integer", "minimum": 0 },
+                    "myHello": {
+                      "description": "Your waiting blind hello, or null.",
+                      "nullable": true,
+                      "type": "object",
+                      "properties": { "body": { "type": "string" }, "expiresAt": { "type": "string", "format": "date-time" } }
+                    },
+                    "practice": { "type": "boolean", "description": "The AI practice chat (POST /chat/practice) is available." },
                     "blindHour": {
                       "type": "object",
                       "required": ["active", "startsAt", "endsAt"],
@@ -1439,6 +1446,72 @@
             }
           },
           "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/chat/anonymous/hello": {
+      "post": {
+        "tags": ["chat"],
+        "summary": "Leave a blind hello",
+        "description": "Saves (or replaces) your opening line for 24 hours. The next compatible person who starts a blind chat is paired with you and sees it as the first message; you get a push.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["body"],
+                "properties": { "body": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Saved: {body, expiresAt}" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "delete": {
+        "tags": ["chat"],
+        "summary": "Take back your blind hello",
+        "responses": { "204": { "description": "Removed (or there was none)" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/chat/practice": {
+      "post": {
+        "tags": ["chat"],
+        "summary": "AI practice chat (clearly labelled AI)",
+        "description": "One turn with an AI practice partner, available when the server has an OpenAI key. It always presents as AI, never becomes a match and stores nothing; the app sends the recent history. persona is one of books, outdoors, food, music, travel, creative. 60 turns an hour.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["persona", "messages"],
+                "properties": {
+                  "persona": { "type": "string", "enum": ["books", "outdoors", "food", "music", "travel", "creative"] },
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["role", "content"],
+                      "properties": { "role": { "type": "string", "enum": ["user", "assistant"] }, "content": { "type": "string", "maxLength": 500 } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "{reply}" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "description": "Too many turns this hour" },
+          "503": { "description": "The model is unavailable" }
         }
       }
     },
