@@ -31,6 +31,8 @@ type Notify struct {
 	Messages  bool `json:"messages"`
 	DailyEdit bool `json:"dailyEdit"`
 	Weekly    bool `json:"weekly"`
+	// BlindHour is the daily "Blind hour is open" reminder (9 PM local).
+	BlindHour bool `json:"blindHour"`
 }
 
 // QuietHours is a nightly window, in local wall-clock time, when pushes wait
@@ -52,7 +54,7 @@ type Settings struct {
 // everything on, no quiet hours, UTC.
 func Defaults() Settings {
 	return Settings{
-		Notify:     Notify{Matches: true, Messages: true, DailyEdit: true, Weekly: true},
+		Notify:     Notify{Matches: true, Messages: true, DailyEdit: true, Weekly: true, BlindHour: true},
 		QuietHours: QuietHours{TZ: "UTC"},
 	}
 }
@@ -136,6 +138,7 @@ type NotifyPatch struct {
 	Messages  *bool `json:"messages"`
 	DailyEdit *bool `json:"dailyEdit"`
 	Weekly    *bool `json:"weekly"`
+	BlindHour *bool `json:"blindHour"`
 }
 
 type QuietPatch struct {
@@ -179,6 +182,7 @@ func (s Settings) Apply(p Patch) (Settings, error) {
 		setBool(&out.Notify.Messages, n.Messages)
 		setBool(&out.Notify.DailyEdit, n.DailyEdit)
 		setBool(&out.Notify.Weekly, n.Weekly)
+		setBool(&out.Notify.BlindHour, n.BlindHour)
 	}
 	if q := p.QuietHours; q != nil {
 		if q.Start.Set {
@@ -233,10 +237,10 @@ type Querier interface {
 func Load(ctx context.Context, q Querier, userID string) (Settings, error) {
 	s := Defaults()
 	err := q.QueryRow(ctx, `
-		select notify_matches, notify_messages, notify_daily_edit, notify_weekly,
+		select notify_matches, notify_messages, notify_daily_edit, notify_weekly, notify_blind_hour,
 		       quiet_start, quiet_end, tz
 		from user_settings where user_id = $1
-	`, userID).Scan(&s.Notify.Matches, &s.Notify.Messages, &s.Notify.DailyEdit, &s.Notify.Weekly,
+	`, userID).Scan(&s.Notify.Matches, &s.Notify.Messages, &s.Notify.DailyEdit, &s.Notify.Weekly, &s.Notify.BlindHour,
 		&s.QuietHours.Start, &s.QuietHours.End, &s.QuietHours.TZ)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Defaults(), nil
@@ -274,11 +278,12 @@ func (p pgStore) Update(ctx context.Context, userID string, change func(Settings
 	}
 	current := Defaults()
 	if err = tx.QueryRow(ctx, `
-		select notify_matches, notify_messages, notify_daily_edit, notify_weekly,
+		select notify_matches, notify_messages, notify_daily_edit, notify_weekly, notify_blind_hour,
 		       quiet_start, quiet_end, tz
 		from user_settings where user_id = $1 for update
 	`, userID).Scan(&current.Notify.Matches, &current.Notify.Messages, &current.Notify.DailyEdit,
-		&current.Notify.Weekly, &current.QuietHours.Start, &current.QuietHours.End, &current.QuietHours.TZ); err != nil {
+		&current.Notify.Weekly, &current.Notify.BlindHour,
+		&current.QuietHours.Start, &current.QuietHours.End, &current.QuietHours.TZ); err != nil {
 		return Settings{}, err
 	}
 	next, err := change(current)
@@ -288,10 +293,10 @@ func (p pgStore) Update(ctx context.Context, userID string, change func(Settings
 	if _, err = tx.Exec(ctx, `
 		update user_settings set
 			notify_matches = $2, notify_messages = $3, notify_daily_edit = $4, notify_weekly = $5,
-			quiet_start = $6, quiet_end = $7, tz = $8, updated_at = now()
+			notify_blind_hour = $9, quiet_start = $6, quiet_end = $7, tz = $8, updated_at = now()
 		where user_id = $1
 	`, userID, next.Notify.Matches, next.Notify.Messages, next.Notify.DailyEdit, next.Notify.Weekly,
-		next.QuietHours.Start, next.QuietHours.End, next.QuietHours.TZ); err != nil {
+		next.QuietHours.Start, next.QuietHours.End, next.QuietHours.TZ, next.Notify.BlindHour); err != nil {
 		return Settings{}, err
 	}
 	return next, tx.Commit(ctx)

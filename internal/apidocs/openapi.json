@@ -618,7 +618,8 @@
               "matches": { "type": "boolean", "description": "New matches and likes." },
               "messages": { "type": "boolean" },
               "dailyEdit": { "type": "boolean" },
-              "weekly": { "type": "boolean" }
+              "weekly": { "type": "boolean" },
+              "blindHour": { "type": "boolean", "description": "Daily 'Blind hour is open' reminder at 21:00 local." }
             }
           },
           "quietHours": {
@@ -632,7 +633,7 @@
           }
         },
         "example": {
-          "notify": { "matches": true, "messages": true, "dailyEdit": true, "weekly": false },
+          "notify": { "matches": true, "messages": true, "dailyEdit": true, "weekly": false, "blindHour": true },
           "quietHours": { "start": "22:00", "end": "07:00", "tz": "Asia/Dhaka" }
         }
       },
@@ -1405,6 +1406,39 @@
           "403": {
             "description": "Origin rejected"
           }
+        }
+      }
+    },
+    "/chat/anonymous/status": {
+      "get": {
+        "tags": ["chat"],
+        "summary": "People looking for a blind chat now, and your Blind hour",
+        "description": "lookingNow is the real number of other people in the anonymous queue this moment. Blind hour is 21:00–22:00 in your time zone (from /me/settings); startsAt/endsAt are today's window, or tomorrow's once today's has ended.",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["lookingNow", "blindHour"],
+                  "properties": {
+                    "lookingNow": { "type": "integer", "minimum": 0 },
+                    "blindHour": {
+                      "type": "object",
+                      "required": ["active", "startsAt", "endsAt"],
+                      "properties": {
+                        "active": { "type": "boolean" },
+                        "startsAt": { "type": "string", "format": "date-time" },
+                        "endsAt": { "type": "string", "format": "date-time" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
         }
       }
     },

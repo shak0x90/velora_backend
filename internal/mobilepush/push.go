@@ -41,6 +41,7 @@ const (
 	EventLike      = "like"
 	EventDailyEdit = "dailyEdit"
 	EventWeekly    = "weekly"
+	EventBlindHour = "blindHour"
 )
 
 // Allowed reports whether s lets event through. Likes ride on the matches
@@ -55,6 +56,8 @@ func Allowed(s settings.Settings, event string) bool {
 		return s.Notify.DailyEdit
 	case EventWeekly:
 		return s.Notify.Weekly
+	case EventBlindHour:
+		return s.Notify.BlindHour
 	default:
 		return false
 	}
@@ -121,6 +124,18 @@ const messageDelay = 5 * time.Second
 // Enqueue schedules note for every device userID has registered on a
 // configured platform, inside tx. Turned-off categories enqueue nothing;
 // quiet hours delay the job to the end of the window rather than dropping it.
+// EnqueueBlindHour queues the daily "Blind hour is open" reminder; tapping
+// it opens anonymous chat. Satisfies blindhour.Notifier.
+func (q *Queue) EnqueueBlindHour(ctx context.Context, tx pgx.Tx, userID string) error {
+	return q.Enqueue(ctx, tx, userID, Note{
+		Event:    EventBlindHour,
+		Title:    "Blind hour is open 🎭",
+		Body:     "Talk first, see each other later. People are looking for a blind chat now.",
+		Data:     map[string]string{"type": "blindHour"},
+		Collapse: "blind-hour",
+	})
+}
+
 func (q *Queue) Enqueue(ctx context.Context, tx pgx.Tx, userID string, note Note) error {
 	if q == nil || !q.router.Any() {
 		return nil
@@ -245,6 +260,11 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[Args]) error {
 		return nil
 	}
 	if until, quiet := prefs.QuietUntil(w.q.now()); quiet {
+		if a.Event == EventBlindHour {
+			// "It's open now" delivered after quiet hours would be wrong.
+			slog.Info("push skipped", "device", a.DeviceID, "event", a.Event, "reason", "quiet hours")
+			return nil
+		}
 		return river.JobSnooze(until.Sub(w.q.now()))
 	}
 

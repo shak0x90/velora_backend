@@ -23,6 +23,7 @@ import (
 	"github.com/shak0x90/velora_backend/internal/account"
 	"github.com/shak0x90/velora_backend/internal/apidocs"
 	"github.com/shak0x90/velora_backend/internal/auth"
+	"github.com/shak0x90/velora_backend/internal/blindhour"
 	"github.com/shak0x90/velora_backend/internal/chat"
 	"github.com/shak0x90/velora_backend/internal/chatpush"
 	"github.com/shak0x90/velora_backend/internal/config"
@@ -195,6 +196,7 @@ func serve(cfg config.Config) error {
 	}
 	mobilepush.NewDevices(pool, authService).Routes(mux)
 	settings.New(pool, authService).Routes(mux)
+	blindhour.New(pool, authService).Routes(mux)
 
 	social.New(pool, authService).WithPush(mobileQueue.SocialHook).Routes(mux)
 	safety.New(pool, authService).Routes(mux)
@@ -309,6 +311,8 @@ func work(cfg config.Config) error {
 	if err = mobile.Start(ctx); err != nil {
 		return err
 	}
+	// Daily "Blind hour is open" reminders, at 21:00 in each person's zone.
+	go blindhour.RunReminders(ctx, pool, mobile)
 	<-ctx.Done()
 	shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
