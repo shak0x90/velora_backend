@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -26,10 +27,11 @@ type socketClient struct {
 	ephemeral chan any
 }
 type Hub struct {
-	s       *Service
-	mu      sync.Mutex
-	clients map[*socketClient]bool
-	closed  bool
+	s         *Service
+	mu        sync.Mutex
+	clients   map[*socketClient]bool
+	closed    bool
+	listening atomic.Bool
 }
 
 func NewHub(s *Service) *Hub { return &Hub{s: s, clients: map[*socketClient]bool{}} }
@@ -62,17 +64,30 @@ func (h *Hub) logout(id string) {
 		}
 	}
 }
+
+// Every event write notifies velora_chat (chatlog.Append), so while the
+// listener is up a wake-everyone sweep is only a safety net: once a minute.
+// With the listener down, sockets fall back to a sweep every 5 seconds.
+const (
+	sweepWhileDown      = 5 * time.Second
+	sweepWhileListening = 12 // ticks, i.e. 60 seconds
+)
+
 func (h *Hub) Run(ctx context.Context) {
 	go func() {
-		t := time.NewTicker(5 * time.Second)
+		t := time.NewTicker(sweepWhileDown)
 		defer t.Stop()
+		ticks := 0
 		for {
 			select {
 			case <-ctx.Done():
 				h.Close()
 				return
 			case <-t.C:
-				h.signal()
+				ticks++
+				if !h.listening.Load() || ticks%sweepWhileListening == 0 {
+					h.signal()
+				}
 			}
 		}
 	}()
@@ -82,6 +97,7 @@ func (h *Hub) Run(ctx context.Context) {
 			_, err = conn.Exec(ctx, "LISTEN velora_chat")
 		}
 		if err == nil {
+			h.listening.Store(true)
 			h.signal()
 			for ctx.Err() == nil {
 				n, e := conn.WaitForNotification(ctx)
@@ -96,6 +112,7 @@ func (h *Hub) Run(ctx context.Context) {
 				}
 			}
 		}
+		h.listening.Store(false)
 		if conn != nil {
 			conn.Close(context.Background())
 		}
@@ -210,6 +227,7 @@ func (s *Service) handleSocket(w http.ResponseWriter, r *http.Request) {
 	client.wake <- struct{}{}
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
+	pings := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -219,8 +237,12 @@ func (s *Service) handleSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ticker.C:
-			if _, err = s.users.CurrentUser(ctx, uid); err != nil {
-				return
+			// Sign-out and deletion close the socket at once via NOTIFY; this
+			// re-check only catches other status changes, so every ~100 s.
+			if pings++; pings%4 == 0 {
+				if _, err = s.users.CurrentUser(ctx, uid); err != nil {
+					return
+				}
 			}
 			if err = conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
 				return
