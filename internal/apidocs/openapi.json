@@ -1457,8 +1457,8 @@
     "/chat/anonymous/hello": {
       "post": {
         "tags": ["chat"],
-        "summary": "Leave a blind hello",
-        "description": "Saves (or replaces) your opening line for 24 hours. The next compatible person who starts a blind chat is paired with you and sees it as the first message; you get a push.",
+        "summary": "Post a hello to the board",
+        "description": "Posts (or replaces) your hello on the board for 24 hours. Matching people see it at GET /chat/anonymous/hellos and can reply; each reply opens its own blind chat (up to 5), and you get a push. A new hello starts fresh with no replies.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1482,6 +1482,50 @@
         "tags": ["chat"],
         "summary": "Take back your blind hello",
         "responses": { "204": { "description": "Removed (or there was none)" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/chat/anonymous/hellos": {
+      "get": {
+        "tags": ["chat"],
+        "summary": "The hello board",
+        "description": "Open hellos from people who fit your preferences both ways (and whom you have never chatted with), newest first, at most 50. Each shows the author's age, a distance rounded up to 5 km (omitted without both locations) and up to three interests, shared ones first. Never a name or photo. Hellos you replied to, and full ones (5 replies), are left out.",
+        "parameters": [
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["everywhere", "nearby"], "default": "everywhere" }, "description": "nearby: within your max distance" }
+        ],
+        "responses": {
+          "200": { "description": "{hellos: [{id, body, createdAt, expiresAt, age, distanceKm?, interests, shared}]}" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/chat/anonymous/hellos/{id}/reply": {
+      "post": {
+        "tags": ["chat"],
+        "summary": "Reply to a hello",
+        "description": "Opens a blind chat with the hello's author: their hello is message 1, your reply message 2. The author gets a push.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["body"],
+                "properties": {
+                  "body": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "clientMessageId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "{id}: the new blind chat" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "The hello is gone, full, already answered by you, or not for you" },
+          "429": { "description": "Too many replies; try again later" }
+        }
       }
     },
     "/chat/practice": {

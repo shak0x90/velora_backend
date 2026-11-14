@@ -2,6 +2,8 @@ package blindhour
 
 import (
 	"context"
+	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/shak0x90/velora_backend/internal/auth"
 	"github.com/shak0x90/velora_backend/internal/db"
 )
 
@@ -126,6 +129,74 @@ func TestLookingAlertsCompatiblePeopleAtMostEveryFewHours(t *testing.T) {
 	s.Looking(ctx, searcher)
 	if got := mine(); len(got) != 1 {
 		t.Fatalf("alerted again within the window: %v", got)
+	}
+}
+
+// The status counts only people the caller could be paired with: before,
+// "2 people looking" could be two people you would never be connected to.
+// Run with PUSH_TEST_DATABASE_URL=postgres://.../velora_push_test.
+func TestStatusCountsOnlyCompatiblePeople(t *testing.T) {
+	dsn := os.Getenv("PUSH_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set PUSH_TEST_DATABASE_URL to an isolated *_push_test database")
+	}
+	if err := db.Migrate(dsn); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	// viewer is a woman who wants women. fit is a woman; off is a man.
+	viewer, fit, off := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	for id, gender := range map[string]string{viewer: "woman", fit: "woman", off: "man"} {
+		if _, err := pool.Exec(ctx, `insert into users (id, status) values ($1, 'active')`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `insert into profiles (user_id, first_name, birth_date, gender, interested_in) values ($1, 'T', '1995-01-01', $2, '{woman}')`, id, gender); err != nil {
+			t.Fatal(err)
+		}
+		if id != viewer {
+			if _, err := pool.Exec(ctx, `insert into chat_queue (user_id, expires_at) values ($1, now() + interval '30 seconds')`, id); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `insert into blind_hellos (user_id, body, client_message_id, expires_at) values ($1, 'hi', $2, now() + interval '1 day')`, id, uuid.New()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `delete from users where id = any($1::uuid[])`, []string{viewer, fit, off})
+	})
+
+	s := &Service{pool: pool, now: time.Now}
+	status := func() Status {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/chat/anonymous/status", nil).WithContext(auth.WithUserID(ctx, viewer))
+		rec := httptest.NewRecorder()
+		s.handleStatus(rec, req)
+		if rec.Code != 200 {
+			t.Fatal(rec.Code, rec.Body.String())
+		}
+		var got Status
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	got := status()
+	if got.LookingNow < 1 || got.Hellos < 1 || got.OnlineNow < 1 {
+		t.Fatalf("want the compatible woman counted: %+v", got)
+	}
+	// Other tests may leave people behind, so compare with the man removed:
+	// if he had been counted, the numbers would drop.
+	_, _ = pool.Exec(ctx, `delete from chat_queue where user_id = $1`, off)
+	_, _ = pool.Exec(ctx, `delete from blind_hellos where user_id = $1`, off)
+	if without := status(); without.LookingNow != got.LookingNow || without.Hellos != got.Hellos {
+		t.Fatalf("the incompatible man was counted: with %+v, without %+v", got, without)
 	}
 }
 

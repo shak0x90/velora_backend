@@ -47,10 +47,17 @@ func Window(now time.Time, loc *time.Location) (start, end time.Time, active boo
 
 // Status is the GET /chat/anonymous/status answer.
 type Status struct {
-	// LookingNow is how many people are in the anonymous queue this moment
-	// (excluding the caller). Real, not rounded up.
-	LookingNow int    `json:"lookingNow"`
-	BlindHour  Period `json:"blindHour"`
+	// LookingNow is how many people the caller could be paired with are
+	// searching for an instant blind chat this moment. Real, not rounded up:
+	// someone outside your preferences, or already chatted with, is not
+	// counted, because you could never be connected to them.
+	LookingNow int `json:"lookingNow"`
+	// OnlineNow is how many such people have Thapaw open right now (and are
+	// not incognito): who a "someone is looking" alert could reach.
+	OnlineNow int `json:"onlineNow"`
+	// Hellos is how many hellos on the board the caller can reply to.
+	Hellos    int    `json:"hellos"`
+	BlindHour Period `json:"blindHour"`
 	// MyHello is the caller's waiting blind hello, if any.
 	MyHello *Hello `json:"myHello"`
 	// Practice says the AI practice chat is available (POST /chat/practice).
@@ -60,6 +67,8 @@ type Status struct {
 type Hello struct {
 	Body      string    `json:"body"`
 	ExpiresAt time.Time `json:"expiresAt"`
+	// Replies is how many chats it has opened (it closes at five).
+	Replies int `json:"replies"`
 }
 
 type Period struct {
@@ -110,16 +119,31 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	var looking int
-	if err := s.pool.QueryRow(ctx,
-		`select count(*) from chat_queue where expires_at > now() and user_id <> $1`, uid).Scan(&looking); err != nil {
+	var looking, online, hellos int
+	if err := s.pool.QueryRow(ctx, `
+		select
+		  (select count(*) from chat_queue q
+		     join users u on u.id = q.user_id and u.status = 'active'
+		     join profiles p on p.user_id = q.user_id
+		    where q.user_id <> me.user_id and q.expires_at > now() and `+chat.CompatibleSQL+`),
+		  (select count(*) from profiles p
+		     join users u on u.id = p.user_id and u.status = 'active'
+		    where p.user_id <> me.user_id and not p.incognito
+		      and p.last_active_at > now() - interval '3 minutes' and `+chat.CompatibleSQL+`),
+		  (select count(*) from blind_hellos h
+		     join users u on u.id = h.user_id and u.status = 'active'
+		     join profiles p on p.user_id = h.user_id
+		    where h.user_id <> me.user_id and h.expires_at > now() and h.reply_count < 5
+		      and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = me.user_id)
+		      and `+chat.CompatibleSQL+`)
+		from profiles me where me.user_id = $1`, uid).Scan(&looking, &online, &hellos); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, r, err)
 		return
 	}
 	var hello *Hello
 	var h Hello
-	err = s.pool.QueryRow(ctx, `select body, expires_at from blind_hellos where user_id = $1 and expires_at > now()`, uid).
-		Scan(&h.Body, &h.ExpiresAt)
+	err = s.pool.QueryRow(ctx, `select body, expires_at, reply_count from blind_hellos where user_id = $1 and expires_at > now()`, uid).
+		Scan(&h.Body, &h.ExpiresAt, &h.Replies)
 	switch {
 	case err == nil:
 		hello = &h
@@ -130,6 +154,8 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 	start, end, active := Window(s.now(), prefs.Location())
 	httpx.JSON(w, http.StatusOK, Status{
 		LookingNow: looking,
+		OnlineNow:  online,
+		Hellos:     hellos,
 		BlindHour:  Period{Active: active, StartsAt: start.UTC(), EndsAt: end.UTC()},
 		MyHello:    hello,
 		Practice:   s.practice,
@@ -161,7 +187,7 @@ func (s *Service) Looking(ctx context.Context, searcher string) {
 		  and not exists (select 1 from chat_queue q where q.user_id = p.user_id and q.expires_at > now())
 		  and not exists (select 1 from blind_alerts a where a.recipient = p.user_id and a.sent_at > now() - $2::interval)
 		  and `+chat.CompatibleSQL+`
-		order by random() limit $3
+		order by p.last_active_at desc limit $3
 	`, searcher, alertEvery.String(), alertsPerSearch)
 	if err != nil {
 		slog.Warn("blind alerts", "error", err)

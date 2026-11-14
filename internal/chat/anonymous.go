@@ -65,8 +65,8 @@ func (s *Service) eligible(ctx context.Context, q rowQuerier, uid string) (bool,
 }
 
 // Joining the short-lived queue is explicit consent to a text-only pairing.
-// A search pairs, in order: with someone searching right now, else with the
-// oldest compatible blind hello; otherwise the caller waits in the queue.
+// Instant blind chat: a search pairs with a compatible person searching right
+// now; otherwise the caller waits in the queue.
 func (s *Service) handleAnonymous(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	uid := user(r)
@@ -133,47 +133,9 @@ func (s *Service) handleAnonymous(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. The oldest compatible blind hello, left by someone who found nobody.
-	var author, body, clientID string
-	err = tx.QueryRow(ctx, `select h.user_id::text, h.body, h.client_message_id::text from blind_hellos h
- join users u on u.id=h.user_id and u.status='active'
- join profiles p on p.user_id=h.user_id join profiles me on me.user_id=$1
- where h.user_id<>$1 and h.expires_at>now() and `+compatibleSQL+`
- order by h.created_at limit 1 for update of h skip locked`, uid).Scan(&author, &body, &clientID)
-	if err == nil {
-		c, err := s.pairAnonymous(ctx, tx, uid, author)
-		if err != nil {
-			httpx.Error(w, r, err)
-			return
-		}
-		if _, err = tx.Exec(ctx, `delete from blind_hellos where user_id=$1`, author); err != nil {
-			httpx.Error(w, r, err)
-			return
-		}
-		// The hello becomes the chat's first message, from its author.
-		if _, err = s.insert(ctx, tx, c, author, SendInput{ClientMessageID: clientID, Body: body, Kind: "text"}); err != nil {
-			httpx.Error(w, r, err)
-			return
-		}
-		if s.blind.HelloAnswered != nil {
-			if err = s.blind.HelloAnswered(ctx, tx, author, c.ID); err != nil {
-				httpx.Error(w, r, err)
-				return
-			}
-		}
-		if err = tx.Commit(ctx); err != nil {
-			httpx.Error(w, r, err)
-			return
-		}
-		httpx.JSON(w, 200, map[string]string{"id": c.ID})
-		return
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		httpx.Error(w, r, err)
-		return
-	}
-
-	// 3. Nobody: wait, and let compatible people know someone is looking.
+	// 2. Nobody: wait, and let compatible people know someone is looking.
+	// Hellos are no longer consumed here; they live on the board, where
+	// people choose which to answer (hellos.go).
 	if err = tx.Commit(ctx); err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -256,11 +218,26 @@ func (s *Service) handleLeaveHello(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, httpx.TooManyRequests("You've changed your hello a lot today. Try again tomorrow."))
 		return
 	}
+	// A new hello is a new card: fresh id, no replies yet. Chats that came
+	// from the old one carry on.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `delete from blind_hellos where user_id=$1`, uid); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var expires time.Time
-	err = s.pool.QueryRow(ctx, `insert into blind_hellos(user_id,body,client_message_id,expires_at) values($1,$2,$3,now()+$4::interval)
- on conflict(user_id) do update set body=excluded.body, client_message_id=excluded.client_message_id, created_at=now(), expires_at=excluded.expires_at
+	err = tx.QueryRow(ctx, `insert into blind_hellos(user_id,body,client_message_id,expires_at) values($1,$2,$3,now()+$4::interval)
  returning expires_at`, uid, in.Body, uuid.NewString(), helloLifetime.String()).Scan(&expires)
 	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if err = tx.Commit(ctx); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}

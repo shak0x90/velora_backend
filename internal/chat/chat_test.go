@@ -545,7 +545,7 @@ func TestPairLockSerializesBlockAndSend(t *testing.T) {
 	}
 }
 
-func TestBlindHelloPairsTheNextSearcher(t *testing.T) {
+func TestHelloBoardAndReplies(t *testing.T) {
 	f := setup(t)
 	var looked []string
 	var lookedMu sync.Mutex
@@ -601,24 +601,108 @@ func TestBlindHelloPairsTheNextSearcher(t *testing.T) {
 		t.Fatal("empty hello accepted", code)
 	}
 
-	// The next compatible searcher is paired with the hello at once.
-	code, out := call("POST", "/chat/anonymous", f.third, `{}`)
-	if code != 200 || out["id"] == nil {
-		t.Fatal("pair with hello", code, out)
+	// Instant search no longer swallows hellos: with nobody searching, the
+	// next searcher just waits.
+	if _, out := call("POST", "/chat/anonymous", f.third, `{}`); out["waiting"] != true {
+		t.Fatal("search consumed a hello", out)
 	}
-	cid := out["id"].(string)
-	var body, sender, origin string
-	if err := f.pool.QueryRow(f.ctx, `select m.body, m.sender_id::text, c.origin from messages m join conversations c on c.id=m.conversation_id where m.conversation_id=$1 and m.seq=1`, cid).Scan(&body, &sender, &origin); err != nil {
+	call("DELETE", "/chat/anonymous", f.third, ``)
+
+	// The hello is on the board for matching people, with age and interests
+	// but no name.
+	if _, err := f.pool.Exec(f.ctx, `update profiles set interests='{Hiking,Coffee,Jazz}' where user_id=$1`, f.a); err != nil {
 		t.Fatal(err)
 	}
-	if body != "What's the best thing you ate this week?" || sender != f.a || origin != "anonymous" {
-		t.Fatalf("first message %q from %s in %s", body, sender, origin)
+	if _, err := f.pool.Exec(f.ctx, `update profiles set interests='{Jazz}' where user_id=$1`, f.third); err != nil {
+		t.Fatal(err)
+	}
+	board := func(uid string) []any {
+		t.Helper()
+		code, out := call("GET", "/chat/anonymous/hellos", uid, ``)
+		if code != 200 {
+			t.Fatal("board", code, out)
+		}
+		return out["hellos"].([]any)
+	}
+	cards := board(f.third)
+	if len(cards) != 1 {
+		t.Fatalf("board: %v", cards)
+	}
+	card := cards[0].(map[string]any)
+	if card["body"] != "What's the best thing you ate this week?" || card["age"] == nil || card["shared"] != float64(1) {
+		t.Fatalf("card: %v", card)
+	}
+	if ints := card["interests"].([]any); len(ints) != 3 || ints[0] != "Jazz" {
+		t.Fatalf("shared interest should come first: %v", ints)
+	}
+	if _, named := card["name"]; named {
+		t.Fatal("card leaks a name")
+	}
+	if len(board(f.a)) != 0 {
+		t.Fatal("author sees own hello")
+	}
+	// b already chats with a (their match), so blind chat never pairs them.
+	if len(board(f.b)) != 0 {
+		t.Fatal("hello shown to someone a already chats with")
+	}
+
+	// Replying opens a blind chat: the hello first (from a), then the reply.
+	helloID := card["id"].(string)
+	code, out := call("POST", "/chat/anonymous/hellos/"+helloID+"/reply", f.third, `{"body":"Mango sticky rice, no contest"}`)
+	if code != 200 || out["id"] == nil {
+		t.Fatal("reply", code, out)
+	}
+	cid := out["id"].(string)
+	rows, err := f.pool.Query(f.ctx, `select m.body, m.sender_id::text, c.origin from messages m join conversations c on c.id=m.conversation_id where m.conversation_id=$1 order by m.seq`, cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for rows.Next() {
+		var body, sender, origin string
+		if err = rows.Scan(&body, &sender, &origin); err != nil || origin != "anonymous" {
+			t.Fatal(err, origin)
+		}
+		got = append(got, sender+":"+body)
+	}
+	rows.Close()
+	if len(got) != 2 || got[0] != f.a+":What's the best thing you ate this week?" || got[1] != f.third+":Mango sticky rice, no contest" {
+		t.Fatalf("messages: %v", got)
 	}
 	if answered.author != f.a || answered.cid != cid {
 		t.Fatalf("hello-answered hook: %+v", answered)
 	}
-	var left int
-	if err := f.pool.QueryRow(f.ctx, `select count(*) from blind_hellos where user_id=$1`, f.a).Scan(&left); err != nil || left != 0 {
-		t.Fatal("hello not consumed", left, err)
+	// The hello stays up for others; the replier can't answer twice.
+	var replies int
+	if err = f.pool.QueryRow(f.ctx, `select reply_count from blind_hellos where user_id=$1`, f.a).Scan(&replies); err != nil || replies != 1 {
+		t.Fatal("reply count", replies, err)
+	}
+	if len(board(f.third)) != 0 {
+		t.Fatal("hello still offered to someone who replied")
+	}
+	if code, _ := call("POST", "/chat/anonymous/hellos/"+helloID+"/reply", f.third, `{"body":"again"}`); code != 404 {
+		t.Fatal("replied twice", code)
+	}
+
+	// Five replies close it.
+	fourth := uuid.NewString()
+	if _, err = f.pool.Exec(f.ctx, `insert into users(id,status) values($1,'active')`, fourth); err != nil {
+		t.Fatal(err)
+	}
+	defer f.pool.Exec(f.ctx, `delete from users where id=$1`, fourth)
+	if _, err = f.pool.Exec(f.ctx, `insert into profiles(user_id,first_name,birth_date,gender) values($1,'Chat tester','1996-01-01','woman')`, fourth); err != nil {
+		t.Fatal(err)
+	}
+	if len(board(fourth)) != 1 {
+		t.Fatal("open hello hidden from a new matching person")
+	}
+	if _, err = f.pool.Exec(f.ctx, `update blind_hellos set reply_count=5 where user_id=$1`, f.a); err != nil {
+		t.Fatal(err)
+	}
+	if len(board(fourth)) != 0 {
+		t.Fatal("full hello still on the board")
+	}
+	if code, _ := call("POST", "/chat/anonymous/hellos/"+helloID+"/reply", fourth, `{"body":"hi"}`); code != 404 {
+		t.Fatal("replied to a full hello", code)
 	}
 }
