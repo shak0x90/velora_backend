@@ -235,6 +235,11 @@
           },
           "revealConsented": {
             "type": "boolean"
+          },
+          "peerLastActive": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the other person last had the app open. Omitted for pending requests, anonymous blind chats before reveal, and incognito people."
           }
         }
       },
