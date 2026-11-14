@@ -59,6 +59,10 @@ type Conversation struct {
 	CanAccept        bool      `json:"canAccept"`
 	IdentityHidden   bool      `json:"identityHidden"`
 	RevealConsented  bool      `json:"revealConsented"`
+	// PeerLastActive is when the other person last had Thapaw open, for
+	// "Active now" / "Active 5m ago". Only in an open conversation, never
+	// while a blind chat is still anonymous or the person is incognito.
+	PeerLastActive *time.Time `json:"peerLastActive,omitempty"`
 }
 type SendInput struct {
 	ClientMessageID string  `json:"clientMessageId"`

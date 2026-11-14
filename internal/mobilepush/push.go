@@ -13,6 +13,7 @@ package mobilepush
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -298,7 +299,7 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[Args]) error {
 
 	data := a.Data
 	if a.Event == EventMessage {
-		cid, deliver, err := deliverableMessage(ctx, pool, a.MessageID, a.UserID)
+		cid, unread, deliver, err := deliverableMessage(ctx, pool, a.MessageID, a.UserID)
 		if err != nil {
 			return err
 		}
@@ -308,6 +309,7 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[Args]) error {
 		}
 		data = copyWith(data, "conversationId", cid)
 		a.Collapse = "chat-" + cid
+		a.Body = messageBody(unread)
 	}
 
 	// Apps that report their version also confirm receipt (POST /push/ack).
@@ -356,10 +358,14 @@ func SendTracked(ctx context.Context, pool *pgxpool.Pool, sender Sender, deviceI
 	return id, nil
 }
 
-func deliverableMessage(ctx context.Context, pool *pgxpool.Pool, messageID, recipientID string) (string, bool, error) {
+func deliverableMessage(ctx context.Context, pool *pgxpool.Pool, messageID, recipientID string) (string, int, bool, error) {
 	var cid string
+	var unread int
 	err := pool.QueryRow(ctx, `
-		select c.id::text
+		select c.id::text,
+		       (select count(*) from messages u
+		         where u.conversation_id = c.id and u.seq > p.last_read_seq
+		           and u.sender_id <> $2 and u.deleted_at is null)
 		from messages m
 		join conversations c on c.id = m.conversation_id
 		join conversation_participants p on p.conversation_id = c.id and p.user_id = $2
@@ -371,11 +377,21 @@ func deliverableMessage(ctx context.Context, pool *pgxpool.Pool, messageID, reci
 		                     or (user_id = c.user_b and blocked_id = c.user_a))
 		  and (c.origin <> 'match'
 		       or exists (select 1 from matches where user_a = c.user_a and user_b = c.user_b))
-	`, messageID, recipientID).Scan(&cid)
+	`, messageID, recipientID).Scan(&cid, &unread)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
+		return "", 0, false, nil
 	}
-	return cid, err == nil, err
+	return cid, unread, err == nil, err
+}
+
+// messageBody is the lock-screen text for a chat push. Each conversation's
+// push replaces the one before it (same tag), so it counts the unread
+// messages instead of stacking one identical notification per message.
+func messageBody(unread int) string {
+	if unread > 1 {
+		return fmt.Sprintf("You have %d new messages on Thapaw.", unread)
+	}
+	return "You have a new message on Thapaw."
 }
 
 func copyWith(in map[string]string, key, value string) map[string]string {

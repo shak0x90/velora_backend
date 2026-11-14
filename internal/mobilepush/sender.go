@@ -186,9 +186,15 @@ func newFCM(project string, client *http.Client, base string) *FCM {
 func (f *FCM) Send(ctx context.Context, m Message) error {
 	android := map[string]any{"priority": "high"}
 	apnsHeaders := map[string]string{}
+	aps := map[string]any{"sound": "default"}
 	if m.Collapse != "" {
+		// collapse_key only merges pushes still waiting on the server; the
+		// notification tag replaces the one already in the shade, so a chat
+		// shows as one notification however many messages arrive.
 		android["collapse_key"] = m.Collapse
+		android["notification"] = map[string]string{"tag": m.Collapse}
 		apnsHeaders["apns-collapse-id"] = m.Collapse
+		aps["thread-id"] = m.Collapse
 	}
 	msg := map[string]any{
 		"token":        m.Token,
@@ -196,7 +202,7 @@ func (f *FCM) Send(ctx context.Context, m Message) error {
 		"android":      android,
 		"apns": map[string]any{
 			"headers": apnsHeaders,
-			"payload": map[string]any{"aps": map[string]any{"sound": "default"}},
+			"payload": map[string]any{"aps": aps},
 		},
 	}
 	if len(m.Data) > 0 {

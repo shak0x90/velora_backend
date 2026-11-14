@@ -204,6 +204,9 @@ func (s *Service) handleSocket(w http.ResponseWriter, r *http.Request) {
 	defer func() { s.hub.mu.Lock(); delete(s.hub.clients, client); s.hub.mu.Unlock() }()
 	ctx, cancel := context.WithDeadline(r.Context(), deadline)
 	defer cancel()
+	// The app holds this socket only while it is on screen, so an open
+	// socket means the person is active.
+	s.touch(ctx, uid)
 	conn.SetReadDeadline(time.Now().Add(75 * time.Second))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(75 * time.Second)) })
 	go func() {
@@ -243,6 +246,7 @@ func (s *Service) handleSocket(w http.ResponseWriter, r *http.Request) {
 				if _, err = s.users.CurrentUser(ctx, uid); err != nil {
 					return
 				}
+				s.touch(ctx, uid)
 			}
 			if err = conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
 				return

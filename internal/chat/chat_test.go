@@ -198,6 +198,42 @@ func TestConcurrentRetryAndReceipts(t *testing.T) {
 	}
 }
 
+// The inbox shows when the other person was last active; sending a message
+// counts as activity, and incognito hides it.
+func TestPeerLastActive(t *testing.T) {
+	f := setup(t)
+	if _, err := f.pool.Exec(f.ctx, `update profiles set last_active_at=now()-interval '2 hours' where user_id=$1`, f.a); err != nil {
+		t.Fatal(err)
+	}
+	peer := func() *time.Time {
+		t.Helper()
+		snap, err := f.s.Bootstrap(f.ctx, f.b, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range snap.Conversations {
+			if c.ID == f.cid {
+				return c.PeerLastActive
+			}
+		}
+		t.Fatal("conversation missing")
+		return nil
+	}
+	if at := peer(); at == nil || time.Since(*at) < time.Hour {
+		t.Fatalf("want about two hours ago, got %v", at)
+	}
+	mustSend(t, f, f.a, f.cid, input("hi"))
+	if at := peer(); at == nil || time.Since(*at) > time.Minute {
+		t.Fatalf("sending should count as active, got %v", at)
+	}
+	if _, err := f.pool.Exec(f.ctx, `update profiles set incognito=true where user_id=$1`, f.a); err != nil {
+		t.Fatal(err)
+	}
+	if at := peer(); at != nil {
+		t.Fatalf("incognito leaked activity: %v", at)
+	}
+}
+
 func TestPaginationAndEventRecovery(t *testing.T) {
 	f := setup(t)
 	for i := 0; i < 55; i++ {
@@ -280,7 +316,7 @@ func TestRequestsRepliesAndReveal(t *testing.T) {
 			t.Fatal(e)
 		}
 		for _, c := range snap.Conversations {
-			if c.ID == anon && (!c.IdentityHidden || c.ProfileID != "") {
+			if c.ID == anon && (!c.IdentityHidden || c.ProfileID != "" || c.PeerLastActive != nil) {
 				t.Fatal("identity leaked", c)
 			}
 		}

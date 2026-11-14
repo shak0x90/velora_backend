@@ -182,7 +182,8 @@ func (s *Service) Bootstrap(ctx context.Context, user, cursor string) (Snapshot,
   c.state='open' or (c.state='pending' and c.requested_by=$1 and c.last_seq=0),
   c.state='pending' and c.requested_by<>$1,
   c.origin='anonymous' and c.revealed_at is null,
-  exists(select 1 from reveal_consents rc where rc.conversation_id=c.id and rc.user_id=$1)
+  exists(select 1 from reveal_consents rc where rc.conversation_id=c.id and rc.user_id=$1),
+  case when c.state='open' and not (c.origin='anonymous' and c.revealed_at is null) and not coalesce(p.incognito,false) then p.last_active_at end
  from conversation_participants me join conversations c on c.id=me.conversation_id
  join conversation_participants other on other.conversation_id=c.id and other.user_id<>me.user_id
  join users peer on peer.id=other.user_id and peer.status='active'
@@ -197,7 +198,7 @@ func (s *Service) Bootstrap(ctx context.Context, user, cursor string) (Snapshot,
 	}
 	for rows.Next() {
 		var c Conversation
-		err = rows.Scan(&c.ID, &c.Origin, &c.State, &c.ProfileID, &c.Name, &c.ParticipantID, &c.LastSeq, &c.LastReadSeq, &c.PeerReadSeq, &c.PeerDeliveredSeq, &c.UnreadCount, &c.Preview, &c.UpdatedAt, &c.Muted, &c.Archived, &c.CanSend, &c.CanAccept, &c.IdentityHidden, &c.RevealConsented)
+		err = rows.Scan(&c.ID, &c.Origin, &c.State, &c.ProfileID, &c.Name, &c.ParticipantID, &c.LastSeq, &c.LastReadSeq, &c.PeerReadSeq, &c.PeerDeliveredSeq, &c.UnreadCount, &c.Preview, &c.UpdatedAt, &c.Muted, &c.Archived, &c.CanSend, &c.CanAccept, &c.IdentityHidden, &c.RevealConsented, &c.PeerLastActive)
 		if err != nil {
 			rows.Close()
 			return out, err
@@ -358,7 +359,16 @@ func (s *Service) Send(ctx context.Context, user, id string, in SendInput) (Mess
 	if err != nil {
 		return m, err
 	}
-	return m, tx.Commit(ctx)
+	if err = tx.Commit(ctx); err == nil {
+		s.touch(ctx, user)
+	}
+	return m, err
+}
+
+// touch records that user has Thapaw open, which drives "Active now" and
+// "Active 5m ago". Best effort, and at most one write per 30 seconds.
+func (s *Service) touch(ctx context.Context, user string) {
+	_, _ = s.pool.Exec(ctx, `update profiles set last_active_at=now() where user_id=$1 and last_active_at < now()-interval '30 seconds'`, user)
 }
 func (s *Service) insert(ctx context.Context, tx pgx.Tx, c thread, user string, in SendInput) (Message, error) {
 	in, err := validateMessage(in)

@@ -240,8 +240,26 @@ func TestFCMSend(t *testing.T) {
 	if msg["data"].(map[string]any)["profileId"] != "p1" {
 		t.Errorf("data %v", msg["data"])
 	}
-	if msg["android"].(map[string]any)["collapse_key"] != "match" {
+	android := msg["android"].(map[string]any)
+	if android["collapse_key"] != "match" {
 		t.Errorf("android %v", msg["android"])
+	}
+	// The tag makes a newer push replace the one already in the shade.
+	if n, _ := android["notification"].(map[string]any); n == nil || n["tag"] != "match" {
+		t.Errorf("android notification tag %v", android["notification"])
+	}
+	aps := msg["apns"].(map[string]any)["payload"].(map[string]any)["aps"].(map[string]any)
+	if aps["thread-id"] != "match" {
+		t.Errorf("aps %v", aps)
+	}
+}
+
+func TestMessageBodyCountsUnread(t *testing.T) {
+	if got := messageBody(1); got != "You have a new message on Thapaw." {
+		t.Error(got)
+	}
+	if got := messageBody(3); got != "You have 3 new messages on Thapaw." {
+		t.Error(got)
 	}
 }
 
