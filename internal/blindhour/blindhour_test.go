@@ -3,6 +3,7 @@ package blindhour
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -55,14 +56,22 @@ func TestWindow(t *testing.T) {
 }
 
 type recorder struct {
-	mu    sync.Mutex
-	users []string
+	mu      sync.Mutex
+	users   []string
+	digests []string
 }
 
 func (r *recorder) EnqueueBlindHour(_ context.Context, _ pgx.Tx, userID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.users = append(r.users, userID)
+	return nil
+}
+
+func (r *recorder) EnqueueHelloDigest(_ context.Context, _ pgx.Tx, userID string, hellos int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.digests = append(r.digests, fmt.Sprintf("%s:%d", userID, hellos))
 	return nil
 }
 
@@ -270,5 +279,84 @@ func TestRemindersOncePerDayInLocalTime(t *testing.T) {
 	run(21, 30)
 	if mine() != 1 {
 		t.Fatal("reminded late in the hour")
+	}
+}
+
+// Run with PUSH_TEST_DATABASE_URL=postgres://.../velora_push_test.
+func TestHelloDigestOncePerDayOnlyWithNewHellos(t *testing.T) {
+	dsn := os.Getenv("PUSH_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set PUSH_TEST_DATABASE_URL to an isolated *_push_test database")
+	}
+	if err := db.Migrate(dsn); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	// reader and empty both want women; poster is a woman with a fresh hello.
+	// empty reported it, so has nothing new.
+	reader, empty, poster := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	all := []string{reader, empty, poster}
+	for _, id := range all {
+		if _, err := pool.Exec(ctx, `insert into users (id, status) values ($1, 'active')`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `insert into profiles (user_id, first_name, birth_date, gender, interested_in) values ($1, 'T', '1995-01-01', 'woman', '{woman}')`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `insert into user_settings (user_id, tz) values ($1, 'Asia/Dhaka')`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `insert into devices (id, user_id, platform, token) values ($1, $2, 'android', $3)`, uuid.New(), id, "tok-"+id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `delete from users where id = any($1::uuid[])`, all) })
+	if _, err := pool.Exec(ctx, `delete from blind_hellos`); err != nil {
+		t.Fatal(err)
+	}
+	var helloID string
+	if err := pool.QueryRow(ctx, `insert into blind_hellos (user_id, body, client_message_id, expires_at) values ($1, 'hi', $2, now() + interval '1 day') returning id::text`, poster, uuid.New()).Scan(&helloID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `insert into blind_hello_reports (hello_id, user_id) values ($1, $2)`, helloID, empty); err != nil {
+		t.Fatal(err)
+	}
+
+	loc, _ := time.LoadLocation("Asia/Dhaka")
+	rec := &recorder{}
+	run := func(h, m int) {
+		t.Helper()
+		if err := digestDue(ctx, pool, rec, time.Date(2026, 11, 14, h, m, 0, 0, loc)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mine := func() []string {
+		var out []string
+		for _, d := range rec.digests {
+			for _, id := range all {
+				if strings.HasPrefix(d, id) {
+					out = append(out, d)
+				}
+			}
+		}
+		return out
+	}
+	run(17, 59)
+	if len(mine()) != 0 {
+		t.Fatal("digest before 6 PM")
+	}
+	run(18, 3)
+	if got := mine(); len(got) != 1 || got[0] != reader+":1" {
+		t.Fatalf("want one digest for the reader with 1 hello, got %v", got)
+	}
+	run(18, 5)
+	if len(mine()) != 1 {
+		t.Fatal("digest sent twice in a day")
 	}
 }

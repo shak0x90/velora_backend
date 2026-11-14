@@ -20,6 +20,10 @@ import (
 
 const helloMaxReplies = 5
 
+// Three different people's reports take a hello off the board for everyone
+// (the literal 3 in the SQL here and in blindhour's status count).
+var helloReportReasons = map[string]bool{"harassment": true, "spam": true, "underage": true, "other": true}
+
 // BoardHello is one card on the board.
 type BoardHello struct {
 	ID        string    `json:"id"`
@@ -51,6 +55,8 @@ const helloBoardSQL = `select h.id::text, h.body, h.created_at, h.expires_at,
  join profiles me on me.user_id = $1
  where h.user_id <> $1 and h.expires_at > now() and h.reply_count < $3
    and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = $1)
+   and h.report_count < 3
+   and not exists (select 1 from blind_hello_reports x where x.hello_id = h.id and x.user_id = $1)
    and (not $2::bool or (me.lat is not null and p.lat is not null
         and earth_distance(ll_to_earth(me.lat, me.lng), ll_to_earth(p.lat, p.lng)) <= me.max_distance_km * 1000))
    and ` + compatibleSQL + `
@@ -135,6 +141,8 @@ func (s *Service) handleHelloReply(w http.ResponseWriter, r *http.Request) {
  join profiles me on me.user_id = $1
  where h.id = $2 and h.user_id <> $1 and h.expires_at > now() and h.reply_count < $3
    and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = $1)
+   and h.report_count < 3
+   and not exists (select 1 from blind_hello_reports x where x.hello_id = h.id and x.user_id = $1)
    and `+compatibleSQL+`
  for update of h`, uid, helloID, helloMaxReplies).Scan(&author, &body)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -178,4 +186,78 @@ func (s *Service) handleHelloReply(w http.ResponseWriter, r *http.Request) {
 	}
 	s.touch(ctx, uid)
 	httpx.JSON(w, http.StatusOK, map[string]string{"id": c.ID})
+}
+
+// handleHelloReport reports a hello on the board. The reporter stops seeing
+// it at once; it joins the moderation queue as a report about its author
+// (with the text, since a hello lapses after a day); and three different
+// reporters take it off the board for everyone.
+func (s *Service) handleHelloReport(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	uid := user(r)
+	helloID := r.PathValue("id")
+	if _, err := uuid.Parse(helloID); err != nil {
+		httpx.Error(w, r, httpx.NotFound("This hello is no longer open."))
+		return
+	}
+	var in struct {
+		Reason string `json:"reason"`
+	}
+	if err := httpx.Decode(r, &in); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if in.Reason == "" {
+		in.Reason = "other"
+	}
+	if !helloReportReasons[in.Reason] {
+		httpx.Error(w, r, httpx.BadRequest("Choose harassment, spam, underage or other."))
+		return
+	}
+	if allowed, _ := s.requestLimit.Allow("helloreport:" + uid); !allowed {
+		httpx.Error(w, r, httpx.TooManyRequests("You've sent a lot of reports. Try again a little later."))
+		return
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	var author, body string
+	err = tx.QueryRow(ctx, `select user_id::text, body from blind_hellos where id = $1 and user_id <> $2 for update`, helloID, uid).Scan(&author, &body)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.Error(w, r, httpx.NotFound("This hello is no longer open."))
+		return
+	}
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	tag, err := tx.Exec(ctx, `insert into blind_hello_reports (hello_id, user_id) values ($1, $2) on conflict do nothing`, helloID, uid)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if tag.RowsAffected() == 1 {
+		if _, err = tx.Exec(ctx, `update blind_hellos set report_count = report_count + 1 where id = $1`, helloID); err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		// Same shape and de-duplication as safety.Report.
+		if _, err = tx.Exec(ctx, `
+			insert into reports (id, reporter_id, subject_id, reason, detail, context)
+			values ($1, $2, $3, $4, $5, 'message')
+			on conflict (reporter_id, subject_id) where status in ('open', 'reviewing')
+			do update set reason = excluded.reason, detail = excluded.detail, context = excluded.context, created_at = now()
+		`, uuid.New(), uid, author, in.Reason, "Blind hello: "+body); err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusNoContent, nil)
 }

@@ -706,3 +706,87 @@ func TestHelloBoardAndReplies(t *testing.T) {
 		t.Fatal("replied to a full hello", code)
 	}
 }
+
+// Reporting a hello hides it from the reporter at once, files a report about
+// its author, and three different reporters take it off the board.
+func TestHelloReports(t *testing.T) {
+	f := setup(t)
+	mux := http.NewServeMux()
+	f.s.Routes(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	call := func(method, path, uid, body string) (int, map[string]any) {
+		req, _ := http.NewRequest(method, server.URL+path, bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+token(uid))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		out := map[string]any{}
+		json.Unmarshal(data, &out)
+		return resp.StatusCode, out
+	}
+	board := func(uid string) int {
+		t.Helper()
+		code, out := call("GET", "/chat/anonymous/hellos", uid, ``)
+		if code != 200 {
+			t.Fatal("board", code, out)
+		}
+		return len(out["hellos"].([]any))
+	}
+	// Three more matching people besides f.third.
+	extra := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
+	for _, id := range extra {
+		if _, err := f.pool.Exec(f.ctx, `insert into users(id,status) values($1,'active')`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.pool.Exec(f.ctx, `insert into profiles(user_id,first_name,birth_date,gender) values($1,'Chat tester','1996-01-01','woman')`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer f.pool.Exec(f.ctx, `delete from users where id=any($1::uuid[])`, extra)
+
+	if code, out := call("POST", "/chat/anonymous/hello", f.a, `{"body":"something rude"}`); code != 200 {
+		t.Fatal("hello", code, out)
+	}
+	var helloID string
+	if err := f.pool.QueryRow(f.ctx, `select id::text from blind_hellos where user_id=$1`, f.a).Scan(&helloID); err != nil {
+		t.Fatal(err)
+	}
+	path := "/chat/anonymous/hellos/" + helloID + "/report"
+	if code, _ := call("POST", path, f.a, `{}`); code != 404 {
+		t.Fatal("reported own hello", code)
+	}
+	if code, _ := call("POST", path, f.third, `{"reason":"made-up"}`); code != 400 {
+		t.Fatal("unknown reason accepted", code)
+	}
+	if code, out := call("POST", path, f.third, `{"reason":"harassment"}`); code != 204 {
+		t.Fatal("report", code, out)
+	}
+	// Twice counts once.
+	call("POST", path, f.third, `{"reason":"harassment"}`)
+	var count int
+	var detail string
+	if err := f.pool.QueryRow(f.ctx, `select report_count from blind_hellos where id=$1`, helloID).Scan(&count); err != nil || count != 1 {
+		t.Fatal("report count", count, err)
+	}
+	if err := f.pool.QueryRow(f.ctx, `select detail from reports where reporter_id=$1 and subject_id=$2`, f.third, f.a).Scan(&detail); err != nil || detail != "Blind hello: something rude" {
+		t.Fatal("moderation report", detail, err)
+	}
+	if board(f.third) != 0 {
+		t.Fatal("reporter still sees the hello")
+	}
+	if board(extra[0]) != 1 {
+		t.Fatal("one report hid the hello from everyone")
+	}
+	if code, _ := call("POST", "/chat/anonymous/hellos/"+helloID+"/reply", f.third, `{"body":"hi"}`); code != 404 {
+		t.Fatal("replied to a hello they reported", code)
+	}
+	call("POST", path, extra[0], `{}`)
+	call("POST", path, extra[1], `{"reason":"spam"}`)
+	if board(extra[2]) != 0 {
+		t.Fatal("three reports left the hello on the board")
+	}
+}

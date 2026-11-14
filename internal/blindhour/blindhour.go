@@ -55,9 +55,11 @@ type Status struct {
 	// OnlineNow is how many such people have Thapaw open right now (and are
 	// not incognito): who a "someone is looking" alert could reach.
 	OnlineNow int `json:"onlineNow"`
-	// Hellos is how many hellos on the board the caller can reply to.
-	Hellos    int    `json:"hellos"`
-	BlindHour Period `json:"blindHour"`
+	// Hellos is how many hellos on the board the caller can reply to, and
+	// NewestHelloAt when the latest of them was posted (for a "new" badge).
+	Hellos        int        `json:"hellos"`
+	NewestHelloAt *time.Time `json:"newestHelloAt,omitempty"`
+	BlindHour     Period     `json:"blindHour"`
 	// MyHello is the caller's waiting blind hello, if any.
 	MyHello *Hello `json:"myHello"`
 	// Practice says the AI practice chat is available (POST /chat/practice).
@@ -120,6 +122,7 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var looking, online, hellos int
+	var newest *time.Time
 	if err := s.pool.QueryRow(ctx, `
 		select
 		  (select count(*) from chat_queue q
@@ -130,13 +133,10 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		     join users u on u.id = p.user_id and u.status = 'active'
 		    where p.user_id <> me.user_id and not p.incognito
 		      and p.last_active_at > now() - interval '3 minutes' and `+chat.CompatibleSQL+`),
-		  (select count(*) from blind_hellos h
-		     join users u on u.id = h.user_id and u.status = 'active'
-		     join profiles p on p.user_id = h.user_id
-		    where h.user_id <> me.user_id and h.expires_at > now() and h.reply_count < 5
-		      and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = me.user_id)
-		      and `+chat.CompatibleSQL+`)
-		from profiles me where me.user_id = $1`, uid).Scan(&looking, &online, &hellos); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		  o.n, o.newest
+		from profiles me
+		cross join lateral (`+openHellosSQL+`) o
+		where me.user_id = $1`, uid).Scan(&looking, &online, &hellos, &newest); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, r, err)
 		return
 	}
@@ -153,14 +153,26 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	start, end, active := Window(s.now(), prefs.Location())
 	httpx.JSON(w, http.StatusOK, Status{
-		LookingNow: looking,
-		OnlineNow:  online,
-		Hellos:     hellos,
-		BlindHour:  Period{Active: active, StartsAt: start.UTC(), EndsAt: end.UTC()},
-		MyHello:    hello,
-		Practice:   s.practice,
+		LookingNow:    looking,
+		OnlineNow:     online,
+		Hellos:        hellos,
+		NewestHelloAt: newest,
+		BlindHour:     Period{Active: active, StartsAt: start.UTC(), EndsAt: end.UTC()},
+		MyHello:       hello,
+		Practice:      s.practice,
 	})
 }
+
+// openHellosSQL counts the board hellos that "me" (a profiles row in the
+// enclosing query) can answer, and when the newest was posted: the same
+// visibility rule as chat's hello board. Yields one row (n, newest).
+const openHellosSQL = `select count(*) as n, max(h.created_at) as newest from blind_hellos h
+		     join users u on u.id = h.user_id and u.status = 'active'
+		     join profiles p on p.user_id = h.user_id
+		    where h.user_id <> me.user_id and h.expires_at > now() and h.reply_count < 5 and h.report_count < 3
+		      and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = me.user_id)
+		      and not exists (select 1 from blind_hello_reports x where x.hello_id = h.id and x.user_id = me.user_id)
+		      and ` + chat.CompatibleSQL
 
 // alertsPerSearch and alertEvery bound the "someone is looking" pushes: a
 // search alerts at most this many people, and nobody gets one more often.
@@ -228,6 +240,7 @@ func (s *Service) alertOne(ctx context.Context, recipient string) error {
 // interface so this package does not import it (and tests can record).
 type Notifier interface {
 	EnqueueBlindHour(ctx context.Context, tx pgx.Tx, userID string) error
+	EnqueueHelloDigest(ctx context.Context, tx pgx.Tx, userID string, hellos int) error
 }
 
 // RunReminders sends "Blind hour is open" once a day to each person with a
@@ -239,6 +252,9 @@ func RunReminders(ctx context.Context, pool *pgxpool.Pool, n Notifier) {
 	for {
 		if err := remindDue(ctx, pool, n, time.Now()); err != nil && ctx.Err() == nil {
 			slog.Warn("blind hour reminders", "error", err)
+		}
+		if err := digestDue(ctx, pool, n, time.Now()); err != nil && ctx.Err() == nil {
+			slog.Warn("hello digest", "error", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -307,5 +323,84 @@ func remindOne(ctx context.Context, pool *pgxpool.Pool, n Notifier, user string,
 		return err
 	}
 	_, _ = tx.Exec(ctx, `delete from blind_hour_reminders where user_id = $1 and day < current_date - 7`, user)
+	return tx.Commit(ctx)
+}
+
+// The hello digest: once a day, in the first minutes after 6 PM local time,
+// people with new hellos they can answer (posted in the last day) are told
+// how many. Nothing is sent when there are none.
+const (
+	digestHour   = 18
+	digestWithin = 10 * time.Minute
+)
+
+func digestDue(ctx context.Context, pool *pgxpool.Pool, n Notifier, now time.Time) error {
+	rows, err := pool.Query(ctx, `
+		select s.user_id::text, s.tz from user_settings s
+		join users u on u.id = s.user_id and u.status = 'active'
+		where s.notify_blind_hour and exists (select 1 from devices d where d.user_id = s.user_id)
+	`)
+	if err != nil {
+		return err
+	}
+	type due struct {
+		user string
+		day  time.Time
+	}
+	var list []due
+	for rows.Next() {
+		var user, tz string
+		if err := rows.Scan(&user, &tz); err != nil {
+			rows.Close()
+			return err
+		}
+		prefs := settings.Defaults()
+		prefs.QuietHours.TZ = tz
+		local := now.In(prefs.Location())
+		start := time.Date(local.Year(), local.Month(), local.Day(), digestHour, 0, 0, 0, local.Location())
+		if !local.Before(start) && local.Sub(start) < digestWithin {
+			list = append(list, due{user, start})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, d := range list {
+		if err := digestOne(ctx, pool, n, d.user, d.day); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func digestOne(ctx context.Context, pool *pgxpool.Pool, n Notifier, user string, day time.Time) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `insert into hello_digests (user_id, day) values ($1, $2) on conflict do nothing`,
+		user, day.Format(time.DateOnly))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // already handled today
+	}
+	var count int
+	err = tx.QueryRow(ctx, `select o.n from profiles me cross join lateral (`+openHellosSQL+`
+		      and h.created_at > now() - interval '24 hours') o where me.user_id = $1`, user).Scan(&count)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if count > 0 {
+		if err := n.EnqueueHelloDigest(ctx, tx, user, count); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `delete from hello_digests where day < current_date - 7`); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }

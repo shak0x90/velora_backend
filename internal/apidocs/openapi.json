@@ -1528,6 +1528,30 @@
         }
       }
     },
+    "/chat/anonymous/hellos/{id}/report": {
+      "post": {
+        "tags": ["chat"],
+        "summary": "Report a hello",
+        "description": "You stop seeing the hello at once and it joins the moderation queue as a report about its author. Three different reporters take it off the board for everyone.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "reason": { "type": "string", "enum": ["harassment", "spam", "underage", "other"], "default": "other" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Reported" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "The hello is gone, or it is your own" }
+        }
+      }
+    },
     "/chat/practice": {
       "post": {
         "tags": ["chat"],

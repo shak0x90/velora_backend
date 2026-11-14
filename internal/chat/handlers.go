@@ -31,6 +31,7 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	guard("DELETE /chat/anonymous/hello", s.handleDeleteHello)
 	guard("GET /chat/anonymous/hellos", s.handleHelloBoard)
 	guard("POST /chat/anonymous/hellos/{id}/reply", s.handleHelloReply)
+	guard("POST /chat/anonymous/hellos/{id}/report", s.handleHelloReport)
 	mux.HandleFunc("GET /chat/ws", s.handleSocket)
 }
 func user(r *http.Request) string { return auth.UserIDFrom(r.Context()) }

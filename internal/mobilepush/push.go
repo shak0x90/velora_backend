@@ -153,6 +153,23 @@ func (q *Queue) EnqueueHelloAnswered(ctx context.Context, tx pgx.Tx, userID, con
 	})
 }
 
+// EnqueueHelloDigest tells someone how many new hellos on the board they can
+// answer; at most once a day, and only when there are some. Same switch as
+// the Blind hour reminder. Satisfies blindhour.Notifier.
+func (q *Queue) EnqueueHelloDigest(ctx context.Context, tx pgx.Tx, userID string, hellos int) error {
+	title := "1 new hello matches you 👋"
+	if hellos > 1 {
+		title = fmt.Sprintf("%d new hellos match you 👋", hellos)
+	}
+	return q.Enqueue(ctx, tx, userID, Note{
+		Event:    EventBlindHour,
+		Title:    title,
+		Body:     "Reply to one to start a blind chat. No photos or names until you both say yes.",
+		Data:     map[string]string{"type": "blindHellos"},
+		Collapse: "blind-hellos",
+	})
+}
+
 // EnqueueBlindHour queues the daily "Blind hour is open" reminder; tapping
 // it opens anonymous chat. Satisfies blindhour.Notifier.
 func (q *Queue) EnqueueBlindHour(ctx context.Context, tx pgx.Tx, userID string) error {
