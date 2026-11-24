@@ -15,15 +15,21 @@ import (
 	"github.com/shak0x90/velora_backend/internal/httpx"
 )
 
-// fitsSQL is the mutual-preference test for blind chat, with "me" the person
-// searching and "p" the candidate's profile: both adults and visible, each
-// within the other's gender and age preferences, not blocked either way.
-const fitsSQL = `p.hidden=false and p.birth_date<=current_date-interval '18 years'
- and (cardinality(me.interested_in)=0 or p.gender=any(me.interested_in))
+// safeSQL is what blind chat never bends, with "me" the person searching and
+// "p" the candidate's profile: an adult, visible profile, not blocked either way.
+const safeSQL = `p.hidden=false and p.birth_date<=current_date-interval '18 years'
+ and not exists(select 1 from blocks where (user_id=me.user_id and blocked_id=p.user_id) or (user_id=p.user_id and blocked_id=me.user_id))`
+
+// prefsSQL is the mutual-preference test: each within the other's gender and
+// age preferences. Instant search requires it; the hello board prefers it but
+// fills with everyone else when few people fit (hellos.go).
+const prefsSQL = `(cardinality(me.interested_in)=0 or p.gender=any(me.interested_in))
  and (cardinality(p.interested_in)=0 or me.gender=any(p.interested_in))
  and date_part('year',age(p.birth_date)) between me.min_age and me.max_age
- and date_part('year',age(me.birth_date)) between p.min_age and p.max_age
- and not exists(select 1 from blocks where (user_id=me.user_id and blocked_id=p.user_id) or (user_id=p.user_id and blocked_id=me.user_id))`
+ and date_part('year',age(me.birth_date)) between p.min_age and p.max_age`
+
+// fitsSQL is safe and within each other's preferences.
+const fitsSQL = safeSQL + "\n and " + prefsSQL
 
 // pairedSQL is true when the two already share a conversation of any kind —
 // a match chat, a request or an earlier blind chat. Blind chat is for
@@ -43,6 +49,10 @@ const CompatibleSQL = compatibleSQL
 const (
 	FitsSQL   = fitsSQL
 	PairedSQL = pairedSQL
+	// SafeSQL and PrefsSQL let the status count the hello board, which
+	// relaxes preferences (see HelloFillBelow).
+	SafeSQL  = safeSQL
+	PrefsSQL = prefsSQL
 )
 
 // BlindHooks connect blind chat to notifications without this package

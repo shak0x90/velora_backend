@@ -1429,7 +1429,9 @@
                   "required": ["lookingNow", "blindHour"],
                   "properties": {
                     "lookingNow": { "type": "integer", "minimum": 0 },
-                    "audience": { "type": "integer", "minimum": 0, "description": "How many people blind chat could ever connect you with, online or not: who can see your hello and who a search can find." },
+                    "audience": { "type": "integer", "minimum": 0, "description": "How many people an instant search could ever pair you with, online or not: they fit your preferences and you theirs, and you have never chatted." },
+                    "helloAudience": { "type": "integer", "minimum": 0, "description": "How many people your hello can reach. The board shows hellos from people outside a viewer's preferences while fewer than 10 fit, so this is every adult, visible stranger not blocked either way." },
+                    "helloChattedBefore": { "type": "integer", "minimum": 0, "description": "People your hello can't reach because you already have a conversation with them." },
                     "chattedBefore": { "type": "integer", "minimum": 0, "description": "People who fit both ways but are left out because you already have a conversation with them. Blind chat only pairs strangers." },
                     "myHello": {
                       "description": "Your waiting blind hello, or null.",
@@ -1490,12 +1492,12 @@
       "get": {
         "tags": ["chat"],
         "summary": "The hello board",
-        "description": "Open hellos from people who fit your preferences both ways (and whom you have never chatted with), newest first, at most 50. Each shows the author's age, a distance rounded up to 5 km (omitted without both locations) and up to three interests, shared ones first. Never a name or photo. Hellos you replied to, and full ones (5 replies), are left out.",
+        "description": "Open hellos from people you have never chatted with, at most 50: those who fit your preferences both ways first (fits: true), then newest first. While fewer than 10 fit, hellos from everyone else fill the board (fits: false), so a small community never sees an empty board; once 10 or more fit, only those are shown. Anyone shown can reply. Each shows the author's age, a distance rounded up to 5 km (omitted without both locations) and up to three interests, shared ones first. Never a name or photo. Hellos you replied to or reported, full ones (5 replies) and ones taken down by reports are left out.",
         "parameters": [
           { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["everywhere", "nearby"], "default": "everywhere" }, "description": "nearby: within your max distance" }
         ],
         "responses": {
-          "200": { "description": "{hellos: [{id, body, createdAt, expiresAt, age, distanceKm?, interests, shared}]}" },
+          "200": { "description": "{hellos: [{id, body, createdAt, expiresAt, age, distanceKm?, interests, shared, fits}]}" },
           "401": { "$ref": "#/components/responses/Unauthorized" }
         }
       }

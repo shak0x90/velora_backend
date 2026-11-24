@@ -204,9 +204,12 @@ func TestStatusCountsOnlyCompatiblePeople(t *testing.T) {
 	// if he had been counted, the numbers would drop.
 	_, _ = pool.Exec(ctx, `delete from chat_queue where user_id = $1`, off)
 	_, _ = pool.Exec(ctx, `delete from blind_hellos where user_id = $1`, off)
-	if without := status(); without.LookingNow != got.LookingNow || without.Hellos != got.Hellos {
-		t.Fatalf("the incompatible man was counted: with %+v, without %+v", got, without)
+	// Instant search never counts him. The hello board does while few fit
+	// (chat.HelloFillBelow), so removing his hello lowers that count by one.
+	if without := status(); without.LookingNow != got.LookingNow || without.Hellos != got.Hellos-1 {
+		t.Fatalf("search should skip the man, the board should fill with his hello: with %+v, without %+v", got, without)
 	}
+	got = status()
 	if got.Audience < 1 {
 		t.Fatalf("want the compatible woman in the audience: %+v", got)
 	}
@@ -264,7 +267,10 @@ func TestRemindersOncePerDayInLocalTime(t *testing.T) {
 	rec := &recorder{}
 	run := func(h, m int) {
 		t.Helper()
-		if err := remindDue(ctx, pool, rec, time.Date(2026, 11, 11, h, m, 0, 0, loc)); err != nil {
+		// Today, not a fixed date: the de-dup rows older than a week are
+		// cleaned up, so a stale date would let a second reminder through.
+		today := time.Now().In(loc)
+		if err := remindDue(ctx, pool, rec, time.Date(today.Year(), today.Month(), today.Day(), h, m, 0, 0, loc)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -346,7 +352,9 @@ func TestHelloDigestOncePerDayOnlyWithNewHellos(t *testing.T) {
 	rec := &recorder{}
 	run := func(h, m int) {
 		t.Helper()
-		if err := digestDue(ctx, pool, rec, time.Date(2026, 11, 14, h, m, 0, 0, loc)); err != nil {
+		// Today, for the same reason as the reminders test.
+		today := time.Now().In(loc)
+		if err := digestDue(ctx, pool, rec, time.Date(today.Year(), today.Month(), today.Day(), h, m, 0, 0, loc)); err != nil {
 			t.Fatal(err)
 		}
 	}

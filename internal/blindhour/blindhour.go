@@ -59,15 +59,22 @@ type Status struct {
 	// NewestHelloAt when the latest of them was posted (for a "new" badge).
 	Hellos        int        `json:"hellos"`
 	NewestHelloAt *time.Time `json:"newestHelloAt,omitempty"`
-	// Audience is how many people blind chat could ever connect the caller
-	// with, online or not: who can see their hello and who a search can
-	// find. Zero means no hello or search can reach anyone yet.
+	// Audience is how many people an instant search could ever pair the
+	// caller with, online or not: they fit both ways and are strangers.
+	// Zero means a search can't find anyone yet.
 	Audience int `json:"audience"`
 	// ChattedBefore is how many people fit both ways but are left out because
 	// the caller already has a conversation with them (a match, a request or
 	// an earlier blind chat). Blind chat only pairs strangers.
-	ChattedBefore int    `json:"chattedBefore"`
-	BlindHour     Period `json:"blindHour"`
+	ChattedBefore int `json:"chattedBefore"`
+	// HelloAudience is how many people the caller's hello can reach. The
+	// board relaxes preferences when few fit (chat.HelloFillBelow), so this
+	// is every adult, visible stranger who hasn't blocked them, or been blocked.
+	HelloAudience int `json:"helloAudience"`
+	// HelloChattedBefore is how many of those are left out because the caller
+	// has already chatted with them.
+	HelloChattedBefore int    `json:"helloChattedBefore"`
+	BlindHour          Period `json:"blindHour"`
 	// MyHello is the caller's waiting blind hello, if any.
 	MyHello *Hello `json:"myHello"`
 	// Practice says the AI practice chat is available (POST /chat/practice).
@@ -129,8 +136,8 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	var looking, online, hellos, audience, chattedBefore int
-	var newest *time.Time
+	var looking, online, fitHellos, allHellos, audience, chattedBefore, helloAudience, helloChatted int
+	var newestFit, newestAll *time.Time
 	if err := s.pool.QueryRow(ctx, `
 		select
 		  (select count(*) from chat_queue q
@@ -141,16 +148,23 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		     join users u on u.id = p.user_id and u.status = 'active'
 		    where p.user_id <> me.user_id and not p.incognito
 		      and p.last_active_at > now() - interval '3 minutes' and `+chat.CompatibleSQL+`),
-		  o.n, o.newest,
+		  o.nfit, o.nall, o.newest_fit, o.newest_all,
 		  (select count(*) from profiles p
 		     join users u on u.id = p.user_id and u.status = 'active'
 		    where p.user_id <> me.user_id and `+chat.CompatibleSQL+`),
 		  (select count(*) from profiles p
 		     join users u on u.id = p.user_id and u.status = 'active'
-		    where p.user_id <> me.user_id and `+chat.FitsSQL+` and `+chat.PairedSQL+`)
+		    where p.user_id <> me.user_id and `+chat.FitsSQL+` and `+chat.PairedSQL+`),
+		  (select count(*) from profiles p
+		     join users u on u.id = p.user_id and u.status = 'active'
+		    where p.user_id <> me.user_id and `+chat.SafeSQL+` and not `+chat.PairedSQL+`),
+		  (select count(*) from profiles p
+		     join users u on u.id = p.user_id and u.status = 'active'
+		    where p.user_id <> me.user_id and `+chat.SafeSQL+` and `+chat.PairedSQL+`)
 		from profiles me
-		cross join lateral (`+openHellosSQL+`) o
-		where me.user_id = $1`, uid).Scan(&looking, &online, &hellos, &newest, &audience, &chattedBefore); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		cross join lateral (`+openHellosSQL("")+`) o
+		where me.user_id = $1`, uid).Scan(&looking, &online, &fitHellos, &allHellos, &newestFit, &newestAll,
+		&audience, &chattedBefore, &helloAudience, &helloChatted); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, r, err)
 		return
 	}
@@ -166,29 +180,43 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start, end, active := Window(s.now(), prefs.Location())
+	hellos, newest := boardCount(fitHellos, allHellos, newestFit, newestAll)
 	httpx.JSON(w, http.StatusOK, Status{
-		LookingNow:    looking,
-		OnlineNow:     online,
-		Hellos:        hellos,
-		NewestHelloAt: newest,
-		Audience:      audience,
-		ChattedBefore: chattedBefore,
-		BlindHour:     Period{Active: active, StartsAt: start.UTC(), EndsAt: end.UTC()},
-		MyHello:       hello,
-		Practice:      s.practice,
+		LookingNow:         looking,
+		OnlineNow:          online,
+		Hellos:             hellos,
+		NewestHelloAt:      newest,
+		Audience:           audience,
+		ChattedBefore:      chattedBefore,
+		HelloAudience:      helloAudience,
+		HelloChattedBefore: helloChatted,
+		BlindHour:          Period{Active: active, StartsAt: start.UTC(), EndsAt: end.UTC()},
+		MyHello:            hello,
+		Practice:           s.practice,
 	})
 }
 
-// openHellosSQL counts the board hellos that "me" (a profiles row in the
-// enclosing query) can answer, and when the newest was posted: the same
-// visibility rule as chat's hello board. Yields one row (n, newest).
-const openHellosSQL = `select count(*) as n, max(h.created_at) as newest from blind_hellos h
+// openHellosSQL counts the hellos that "me" (a profiles row in the enclosing
+// query) can answer, split by whether the author fits both ways, with the
+// newest of each: the same rule as chat's hello board. extra is appended to
+// the WHERE clause. Yields one row (nfit, nall, newest_fit, newest_all).
+func openHellosSQL(extra string) string {
+	return `select count(*) filter (where ` + chat.HelloFitsSQL + `) as nfit, count(*) as nall,
+		       max(h.created_at) filter (where ` + chat.HelloFitsSQL + `) as newest_fit, max(h.created_at) as newest_all
+		     from blind_hellos h
 		     join users u on u.id = h.user_id and u.status = 'active'
 		     join profiles p on p.user_id = h.user_id
-		    where h.user_id <> me.user_id and h.expires_at > now() and h.reply_count < 5 and h.report_count < 3
-		      and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = me.user_id)
-		      and not exists (select 1 from blind_hello_reports x where x.hello_id = h.id and x.user_id = me.user_id)
-		      and ` + chat.CompatibleSQL
+		    where ` + chat.OpenHelloSQL + extra
+}
+
+// boardCount is how many hellos the board shows, and the newest of them:
+// only fitting ones once enough fit, otherwise everyone (capped like the board).
+func boardCount(fit, all int, newestFit, newestAll *time.Time) (int, *time.Time) {
+	if fit >= chat.HelloFillBelow {
+		return fit, newestFit
+	}
+	return min(all, 50), newestAll
+}
 
 // alertsPerSearch and alertEvery bound the "someone is looking" pushes: a
 // search alerts at most this many people, and nobody gets one more often.
@@ -404,12 +432,13 @@ func digestOne(ctx context.Context, pool *pgxpool.Pool, n Notifier, user string,
 	if tag.RowsAffected() == 0 {
 		return nil // already handled today
 	}
-	var count int
-	err = tx.QueryRow(ctx, `select o.n from profiles me cross join lateral (`+openHellosSQL+`
-		      and h.created_at > now() - interval '24 hours') o where me.user_id = $1`, user).Scan(&count)
+	var fit, all int
+	err = tx.QueryRow(ctx, `select o.nfit, o.nall from profiles me cross join lateral (`+
+		openHellosSQL(" and h.created_at > now() - interval '24 hours'")+`) o where me.user_id = $1`, user).Scan(&fit, &all)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
+	count, _ := boardCount(fit, all, nil, nil)
 	if count > 0 {
 		if err := n.EnqueueHelloDigest(ctx, tx, user, count); err != nil {
 			return err

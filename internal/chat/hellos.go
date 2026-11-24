@@ -20,6 +20,16 @@ import (
 
 const helloMaxReplies = 5
 
+// HelloFillBelow is when the board stops being strict about preferences: with
+// fewer hellos than this from people who fit you (and you them), it also shows
+// hellos from everyone else, after those. A small community would otherwise
+// see an empty board, and a hello would reach nobody. Safety, adulthood,
+// blocks, reports and "never chatted before" still always apply.
+const HelloFillBelow = 10
+
+// helloBoardSize is how many cards the board returns.
+const helloBoardSize = 50
+
 // Three different people's reports take a hello off the board for everyone
 // (the literal 3 in the SQL here and in blindhour's status count).
 var helloReportReasons = map[string]bool{"harassment": true, "spam": true, "underage": true, "other": true}
@@ -39,33 +49,72 @@ type BoardHello struct {
 	Interests []string `json:"interests"`
 	// Shared counts interests the author and viewer have in common.
 	Shared int `json:"shared"`
+	// Fits is false for a hello shown only because few people fit the
+	// viewer's preferences (see HelloFillBelow).
+	Fits bool `json:"fits"`
 }
 
-// helloBoardSQL lists the compatible, open hellos for $1, newest first.
-// $2 = nearby only (within the viewer's own max distance); $3 = reply cap.
+// openHelloSQL is who may answer a hello, with "me" the viewer, "p" the
+// author's profile and "h" the hello: open, not full, not already answered or
+// reported by the viewer, not taken down by reports, and a stranger the board
+// may show (safe, never chatted). Preferences are not required here; the board
+// orders by them and drops the rest once enough people fit.
+// (5 is helloMaxReplies.)
+const openHelloSQL = `h.user_id <> me.user_id and h.expires_at > now() and h.reply_count < 5
+   and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = me.user_id)
+   and h.report_count < 3
+   and not exists (select 1 from blind_hello_reports x where x.hello_id = h.id and x.user_id = me.user_id)
+   and ` + safeSQL + `
+   and not ` + pairedSQL
+
+// OpenHelloSQL and HelloFitsSQL let blindhour count the board the same way.
+const (
+	OpenHelloSQL = openHelloSQL
+	HelloFitsSQL = prefsSQL
+)
+
+// helloBoardSQL lists the open hellos for $1, those from people who fit both
+// ways first, then newest first. $2 = nearby only (within the viewer's own max
+// distance). Twice the board size, so trimming to fits-only still fills it.
 const helloBoardSQL = `select h.id::text, h.body, h.created_at, h.expires_at,
   date_part('year', age(p.birth_date))::int,
   case when me.lat is null or me.lng is null or p.lat is null or p.lng is null then null
        else (greatest(1, ceil(earth_distance(ll_to_earth(me.lat, me.lng), ll_to_earth(p.lat, p.lng)) / 5000)) * 5)::int end,
   array(select i from unnest(p.interests) i order by (i = any(me.interests)) desc, i limit 3),
-  cardinality(array(select i from unnest(p.interests) i where i = any(me.interests)))
+  cardinality(array(select i from unnest(p.interests) i where i = any(me.interests))),
+  (` + prefsSQL + `) as fits
  from blind_hellos h
  join users u on u.id = h.user_id and u.status = 'active'
  join profiles p on p.user_id = h.user_id
  join profiles me on me.user_id = $1
- where h.user_id <> $1 and h.expires_at > now() and h.reply_count < $3
-   and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = $1)
-   and h.report_count < 3
-   and not exists (select 1 from blind_hello_reports x where x.hello_id = h.id and x.user_id = $1)
+ where ` + openHelloSQL + `
    and (not $2::bool or (me.lat is not null and p.lat is not null
         and earth_distance(ll_to_earth(me.lat, me.lng), ll_to_earth(p.lat, p.lng)) <= me.max_distance_km * 1000))
-   and ` + compatibleSQL + `
- order by h.created_at desc limit 50`
+ order by fits desc, h.created_at desc limit 100`
+
+// fillBoard keeps hellos from outside the viewer's preferences only while
+// fewer than HelloFillBelow fit, then caps the board. Input is fits-first.
+func fillBoard(all []BoardHello) []BoardHello {
+	fitting := 0
+	for _, h := range all {
+		if h.Fits {
+			fitting++
+		}
+	}
+	out := all
+	if fitting >= HelloFillBelow {
+		out = all[:fitting]
+	}
+	if len(out) > helloBoardSize {
+		out = out[:helloBoardSize]
+	}
+	return out
+}
 
 func (s *Service) handleHelloBoard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	nearby := r.URL.Query().Get("scope") == "nearby"
-	rows, err := s.pool.Query(ctx, helloBoardSQL, user(r), nearby, helloMaxReplies)
+	rows, err := s.pool.Query(ctx, helloBoardSQL, user(r), nearby)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -74,7 +123,7 @@ func (s *Service) handleHelloBoard(w http.ResponseWriter, r *http.Request) {
 	out := []BoardHello{}
 	for rows.Next() {
 		var h BoardHello
-		if err = rows.Scan(&h.ID, &h.Body, &h.CreatedAt, &h.ExpiresAt, &h.Age, &h.DistanceKm, &h.Interests, &h.Shared); err != nil {
+		if err = rows.Scan(&h.ID, &h.Body, &h.CreatedAt, &h.ExpiresAt, &h.Age, &h.DistanceKm, &h.Interests, &h.Shared, &h.Fits); err != nil {
 			httpx.Error(w, r, err)
 			return
 		}
@@ -84,7 +133,7 @@ func (s *Service) handleHelloBoard(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"hellos": out})
+	httpx.JSON(w, http.StatusOK, map[string]any{"hellos": fillBoard(out)})
 }
 
 // handleHelloReply answers a hello: a new blind chat with its author, the
@@ -133,18 +182,15 @@ func (s *Service) handleHelloReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Same rule as the board, re-checked under a row lock so two replies
-	// racing for the last slot cannot both win.
+	// racing for the last slot cannot both win. Preferences are not required:
+	// anyone the board may show can answer (see HelloFillBelow).
 	var author, body string
 	err = tx.QueryRow(ctx, `select h.user_id::text, h.body from blind_hellos h
  join users u on u.id = h.user_id and u.status = 'active'
  join profiles p on p.user_id = h.user_id
  join profiles me on me.user_id = $1
- where h.id = $2 and h.user_id <> $1 and h.expires_at > now() and h.reply_count < $3
-   and not exists (select 1 from blind_hello_replies r where r.hello_id = h.id and r.user_id = $1)
-   and h.report_count < 3
-   and not exists (select 1 from blind_hello_reports x where x.hello_id = h.id and x.user_id = $1)
-   and `+compatibleSQL+`
- for update of h`, uid, helloID, helloMaxReplies).Scan(&author, &body)
+ where h.id = $2 and `+openHelloSQL+`
+ for update of h`, uid, helloID).Scan(&author, &body)
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, r, httpx.NotFound("This hello is no longer open."))
 		return
