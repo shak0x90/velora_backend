@@ -59,7 +59,15 @@ type Status struct {
 	// NewestHelloAt when the latest of them was posted (for a "new" badge).
 	Hellos        int        `json:"hellos"`
 	NewestHelloAt *time.Time `json:"newestHelloAt,omitempty"`
-	BlindHour     Period     `json:"blindHour"`
+	// Audience is how many people blind chat could ever connect the caller
+	// with, online or not: who can see their hello and who a search can
+	// find. Zero means no hello or search can reach anyone yet.
+	Audience int `json:"audience"`
+	// ChattedBefore is how many people fit both ways but are left out because
+	// the caller already has a conversation with them (a match, a request or
+	// an earlier blind chat). Blind chat only pairs strangers.
+	ChattedBefore int    `json:"chattedBefore"`
+	BlindHour     Period `json:"blindHour"`
 	// MyHello is the caller's waiting blind hello, if any.
 	MyHello *Hello `json:"myHello"`
 	// Practice says the AI practice chat is available (POST /chat/practice).
@@ -121,7 +129,7 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	var looking, online, hellos int
+	var looking, online, hellos, audience, chattedBefore int
 	var newest *time.Time
 	if err := s.pool.QueryRow(ctx, `
 		select
@@ -133,10 +141,16 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		     join users u on u.id = p.user_id and u.status = 'active'
 		    where p.user_id <> me.user_id and not p.incognito
 		      and p.last_active_at > now() - interval '3 minutes' and `+chat.CompatibleSQL+`),
-		  o.n, o.newest
+		  o.n, o.newest,
+		  (select count(*) from profiles p
+		     join users u on u.id = p.user_id and u.status = 'active'
+		    where p.user_id <> me.user_id and `+chat.CompatibleSQL+`),
+		  (select count(*) from profiles p
+		     join users u on u.id = p.user_id and u.status = 'active'
+		    where p.user_id <> me.user_id and `+chat.FitsSQL+` and `+chat.PairedSQL+`)
 		from profiles me
 		cross join lateral (`+openHellosSQL+`) o
-		where me.user_id = $1`, uid).Scan(&looking, &online, &hellos, &newest); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		where me.user_id = $1`, uid).Scan(&looking, &online, &hellos, &newest, &audience, &chattedBefore); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, r, err)
 		return
 	}
@@ -157,6 +171,8 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		OnlineNow:     online,
 		Hellos:        hellos,
 		NewestHelloAt: newest,
+		Audience:      audience,
+		ChattedBefore: chattedBefore,
 		BlindHour:     Period{Active: active, StartsAt: start.UTC(), EndsAt: end.UTC()},
 		MyHello:       hello,
 		Practice:      s.practice,

@@ -207,6 +207,20 @@ func TestStatusCountsOnlyCompatiblePeople(t *testing.T) {
 	if without := status(); without.LookingNow != got.LookingNow || without.Hellos != got.Hellos {
 		t.Fatalf("the incompatible man was counted: with %+v, without %+v", got, without)
 	}
+	if got.Audience < 1 {
+		t.Fatalf("want the compatible woman in the audience: %+v", got)
+	}
+
+	// Once the two have a conversation, blind chat leaves her out, and the
+	// status says why instead of just showing an empty board.
+	if _, err := pool.Exec(ctx, `insert into conversations (id, user_a, user_b, origin, state)
+		values ($1, least($2::uuid, $3::uuid), greatest($2::uuid, $3::uuid), 'match', 'open')`, uuid.New(), viewer, fit); err != nil {
+		t.Fatal(err)
+	}
+	after := status()
+	if after.Audience != got.Audience-1 || after.ChattedBefore != got.ChattedBefore+1 || after.Hellos != got.Hellos-1 {
+		t.Fatalf("chatted-before person still counted as reachable: before %+v, after %+v", got, after)
+	}
 }
 
 // Run with PUSH_TEST_DATABASE_URL=postgres://.../velora_push_test.

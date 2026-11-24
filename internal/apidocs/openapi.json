@@ -1429,6 +1429,8 @@
                   "required": ["lookingNow", "blindHour"],
                   "properties": {
                     "lookingNow": { "type": "integer", "minimum": 0 },
+                    "audience": { "type": "integer", "minimum": 0, "description": "How many people blind chat could ever connect you with, online or not: who can see your hello and who a search can find." },
+                    "chattedBefore": { "type": "integer", "minimum": 0, "description": "People who fit both ways but are left out because you already have a conversation with them. Blind chat only pairs strangers." },
                     "myHello": {
                       "description": "Your waiting blind hello, or null.",
                       "nullable": true,

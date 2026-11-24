@@ -15,21 +15,35 @@ import (
 	"github.com/shak0x90/velora_backend/internal/httpx"
 )
 
-// compatibleSQL is the mutual-preference test for blind chat, with "me" the
-// person searching and "p" the candidate's profile: both adults and visible,
-// each within the other's gender and age preferences, not blocked either way,
-// and never paired before.
-const compatibleSQL = `p.hidden=false and p.birth_date<=current_date-interval '18 years'
+// fitsSQL is the mutual-preference test for blind chat, with "me" the person
+// searching and "p" the candidate's profile: both adults and visible, each
+// within the other's gender and age preferences, not blocked either way.
+const fitsSQL = `p.hidden=false and p.birth_date<=current_date-interval '18 years'
  and (cardinality(me.interested_in)=0 or p.gender=any(me.interested_in))
  and (cardinality(p.interested_in)=0 or me.gender=any(p.interested_in))
  and date_part('year',age(p.birth_date)) between me.min_age and me.max_age
  and date_part('year',age(me.birth_date)) between p.min_age and p.max_age
- and not exists(select 1 from blocks where (user_id=me.user_id and blocked_id=p.user_id) or (user_id=p.user_id and blocked_id=me.user_id))
- and not exists(select 1 from conversations where user_a=least(me.user_id,p.user_id) and user_b=greatest(me.user_id,p.user_id))`
+ and not exists(select 1 from blocks where (user_id=me.user_id and blocked_id=p.user_id) or (user_id=p.user_id and blocked_id=me.user_id))`
+
+// pairedSQL is true when the two already share a conversation of any kind —
+// a match chat, a request or an earlier blind chat. Blind chat is for
+// strangers, so these people are never paired or shown each other's hellos.
+const pairedSQL = `exists(select 1 from conversations where user_a=least(me.user_id,p.user_id) and user_b=greatest(me.user_id,p.user_id))`
+
+// compatibleSQL is who blind chat can connect: fits both ways, never paired.
+const compatibleSQL = fitsSQL + "\n and not " + pairedSQL
 
 // CompatibleSQL is exported for the blind-chat alerts, which pick recipients
 // with the same rule (aliases: me = the searcher's profile, p = candidate's).
 const CompatibleSQL = compatibleSQL
+
+// FitsSQL and PairedSQL let the status explain an empty board: someone who
+// fits but has already chatted with you is excluded, which otherwise looks
+// like blind chat not working (two test accounts that matched, typically).
+const (
+	FitsSQL   = fitsSQL
+	PairedSQL = pairedSQL
+)
 
 // BlindHooks connect blind chat to notifications without this package
 // importing them. Both are optional.
